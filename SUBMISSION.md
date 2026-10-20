@@ -28,7 +28,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 
 **Team:** _name, role, X/LinkedIn_
 
-**Links:** GitHub _repo URL_ · Live app _URL_ · Video _URL_ · Deck _URL_
+**Links:** GitHub https://github.com/PugarHuda/payung · Live app https://pugarhuda.github.io/payung/ · Video _URL_ · Deck _URL_
 
 ---
 

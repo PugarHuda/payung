@@ -13,6 +13,7 @@ Built for the [Mezo Buildathon](https://app.akindo.io/wave-hacks/OVOO0gdrVU8379D
 
 | | |
 |---|---|
+| App | https://pugarhuda.github.io/payung/ |
 | Payung vault | [`0x5eFFEe5B8b817E7A1B785C1a97487C6394cb6b87`](https://explorer.test.mezo.org/address/0x5eFFEe5B8b817E7A1B785C1a97487C6394cb6b87), Sourcify `exact_match` |
 | Underwriter deposit (1,500 MUSD) | [`0x2e3ca471…4eb0`](https://explorer.test.mezo.org/tx/0x2e3ca471ad69901e286386dccfca792acd8e5082d56e8c0482ce31f68e2b4eb0) |
 | Cover bought with pre-signed auto-repay (500 MUSD at $72,000, premium 38.5 MUSD) | [`0x3d312134…1367`](https://explorer.test.mezo.org/tx/0x3d31213410763b48178c20361bebc1e0a3562e3303aabbe4b5ec7b2edb6d1367) |
