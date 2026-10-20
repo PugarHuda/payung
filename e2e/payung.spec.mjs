@@ -21,7 +21,7 @@ test.describe('without a wallet', () => {
 
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     await expect(page.locator('.facts div', { hasText: 'Vault value' })).toContainText('MUSD')
-    await expect(page.locator('.activity li').first()).toContainText(/Cover bought|Underwriter deposited|Volatility sample/)
+    await expect(page.locator('.activity')).toContainText('Cover bought') // decoded from the explorer's log API
     await expect(page.getByText(/capped at 50% of the vault/)).toBeVisible()
     expect(errors).toEqual([])
   })
