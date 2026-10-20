@@ -15,7 +15,7 @@ Built for the [Mezo Buildathon](https://app.akindo.io/wave-hacks/OVOO0gdrVU8379D
 
 | | |
 |---|---|
-| App | https://pugarhuda.github.io/payung/ |
+| App | https://payung-ecru.vercel.app (Vercel, deploys on every push; mirror: https://pugarhuda.github.io/payung/) |
 | Payung vault | [`0x7F9f315304450d5E78475223374545B8B9b873A0`](https://explorer.test.mezo.org/address/0x7F9f315304450d5E78475223374545B8B9b873A0), Sourcify `exact_match` |
 | Underwriter deposit (1,000 MUSD) | [`0x74e5516c…80e4`](https://explorer.test.mezo.org/tx/0x74e5516c281fd9141b8b6a1819e5c6a5d2cb2dde3ada9990af6f40b8b24380e4) |
 | Cover with pre-signed auto-repay (300 MUSD at $71,000, ~40 h left, premium 0.75 MUSD) | [`0x8d4499db…f97b`](https://explorer.test.mezo.org/tx/0x8d4499db70caa97f7c582b9f6903c6043c60754c7620f76dbea15749518af97b) |

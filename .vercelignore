@@ -1,0 +1,12 @@
+.env
+.env.*
+node_modules
+contracts/lib
+contracts/out
+contracts/cache
+contracts/broadcast
+test-results
+playwright-report
+.playwright-mcp
+app/dist
+app/dist-fork

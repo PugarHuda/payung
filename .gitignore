@@ -8,3 +8,6 @@ dist/
 test-results/
 playwright-report/
 app/dist-fork/
+
+.vercel
+.env*
