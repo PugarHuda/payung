@@ -22,7 +22,7 @@ Built for the [Mezo Buildathon](https://app.akindo.io/wave-hacks/OVOO0gdrVU8379D
 | 1-week cover, same strike, ~38 h left (100 MUSD, premium 0.25 MUSD) | [`0xf642fc94…914d`](https://explorer.test.mezo.org/tx/0xf642fc94cd824e852e2fa27913852ba98b214d885ac054958ab3a1ee96c5914d) |
 | 2-week cover bought through the app by the e2e test | [`0x2576946c…a517`](https://explorer.test.mezo.org/tx/0x2576946c1d6a2aa4d4cb33caac971168ae6ff63a40c1edfdda29ced297cda517) |
 | Auto-repay re-signed after a real Mezo nonce was used up | [`0xfe444b55…d099`](https://explorer.test.mezo.org/tx/0xfe444b55d8e0bc4da7cefc31ae0dde43d26b5c6597c92bcb37750c41a380d099) |
-| Keeper | GitHub Actions every 5 minutes, each run watching for 270 s at 10 s polls ([runs](https://github.com/PugarHuda/payung/actions/workflows/keeper.yml)), dedicated wallet `0x4FF8d702D8CC8c106BB1C7C6Bf56459DE4300d9D` |
+| Keeper | GitHub Actions workflow: each run watches for 270 s at 10 s polls ([runs](https://github.com/PugarHuda/payung/actions/workflows/keeper.yml)), dedicated wallet `0x4FF8d702D8CC8c106BB1C7C6Bf56459DE4300d9D`. It is scheduled every 5 minutes, but GitHub's scheduler is best-effort, and in the first hours after setup only manual runs executed. For dependable coverage run `npm run keeper` (5 s polls) on any always-on machine. |
 | Touch → trigger (reward) → repay into a real trove | Foundry fork tests, and a Playwright test that clicks through it in the app on an anvil fork of Mezo testnet (see Tests); a real touch on testnet needs BTC to actually fall 5%+ |
 
 ## How it works
@@ -137,7 +137,7 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 
 ## Known limits
 
-- **Touch detection** depends on someone calling `trigger` while BTC is under the strike. Mezo's oracle exposes only the latest round, and the Pyth contract on Mezo testnet holds a months-old BTC price whose Hermes history API now needs a key, so a past dip can't be proven on-chain. The hosted keeper polls every 10 s inside runs that GitHub starts every 5 minutes (GitHub may delay them), and `npm run keeper` polls every 5 s. The trigger reward exists so outside bots watch too.
+- **Touch detection** depends on someone calling `trigger` while BTC is under the strike. Mezo's oracle exposes only the latest round, and the Pyth contract on Mezo testnet holds a months-old BTC price whose Hermes history API now needs a key, so a past dip can't be proven on-chain. The GitHub Actions keeper polls every 10 s inside each run, but GitHub starts scheduled runs on a best-effort basis (we saw none fire in the first hours), so it is a backstop, not a guarantee. `npm run keeper` polls every 5 s on any always-on machine. The trigger reward exists so outside bots watch too.
 - **Premium table** shape is fixed (one week, 50% vol); vol and time enter through the distance rescaling. The owner can refresh the table.
 - **Mezo testnet quirks** we hit:
   - `eth_estimateGas` undershoots calls that touch the oracle precompile, so we send a fixed 3M gas limit (gas costs ~150 wei).
