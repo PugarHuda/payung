@@ -1,5 +1,5 @@
 // Shared by the keeper and the app. Mezo testnet (matsnet) addresses from github.com/mezo-org/musd.
-import { defineChain, parseAbi } from 'viem'
+import { defineChain, parseAbi, ContractFunctionRevertedError } from 'viem'
 import payungAbi from '../payung.abi.json' with { type: 'json' }
 
 export const mezoTestnet = defineChain({
@@ -13,6 +13,7 @@ export const mezoTestnet = defineChain({
 
 export const ADDR = {
   payung: '0xdC66559C75c9950f8869e20A04C14494DF601d4d',
+  payungBlock: 16259876n, // deployment block: share-price history starts here
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
   troveManager: '0xE47c80e8c23f6B4A1aE41c34837a0599D5D16bb0',
@@ -89,19 +90,43 @@ export async function autoRepayProblem(client, vault, policy) {
     })
     return null
   } catch (e) {
-    return e.walk?.((x) => x.reason)?.reason ?? e.shortMessage ?? e.message
+    // Only a revert means the repay would fail. A timeout or RPC error says nothing about it, and
+    // a claim can't be redone: rethrow so the caller retries instead of paying the wallet.
+    const revert = e.walk?.((x) => x instanceof ContractFunctionRevertedError)
+    if (!revert) throw e
+    return revert.reason ?? revert.shortMessage
   }
 }
 
-/// Polls eth_getTransactionReceipt directly. viem's waitForTransactionReceipt (block-number watch
-/// + confirmation count) intermittently never resolved against Mezo's RPC for transactions that
-/// were mined in seconds; a plain receipt poll sees them every time.
+/// Waits for a transaction's receipt. Mezo's public RPC is load-balanced and some of its nodes
+/// answer eth_getTransactionReceipt with null for minutes after the transaction is mined; a
+/// kept-alive connection can stay pinned to such a node (that is what made viem's
+/// waitForTransactionReceipt hang). So poll the RPC, and after a few seconds also ask the
+/// explorer, which indexes the same chain, for the status and logs.
 export async function waitForReceipt(client, hash, { timeout = 180_000, interval = 1_500 } = {}) {
-  for (const end = Date.now() + timeout; Date.now() < end; await new Promise((r) => setTimeout(r, interval))) {
+  const start = Date.now()
+  for (; Date.now() < start + timeout; await new Promise((r) => setTimeout(r, interval))) {
     const receipt = await client.getTransactionReceipt({ hash }).catch(() => null)
     if (receipt) return receipt
+    if (Date.now() - start > 6_000) {
+      const fromExplorer = await explorerReceipt(hash).catch(() => null)
+      if (fromExplorer) return fromExplorer
+    }
   }
   throw new Error(`Mezo has not confirmed ${hash} after ${timeout / 1000} s`)
+}
+
+/// The receipt fields Payung reads (status, block, logs), from the Blockscout API. Null while pending.
+export async function explorerReceipt(hash) {
+  const tx = await fetch(`${EXPLORER_API}/transactions/${hash}`).then((r) => (r.ok ? r.json() : null))
+  if (!tx?.block_number || !tx.status) return null
+  const { items } = await fetch(`${EXPLORER_API}/transactions/${hash}/logs`).then((r) => r.json())
+  return {
+    transactionHash: hash,
+    blockNumber: BigInt(tx.block_number),
+    status: tx.status === 'ok' ? 'success' : 'reverted',
+    logs: items.map((l) => ({ address: l.address.hash, topics: l.topics.filter(Boolean), data: l.data, logIndex: l.index, transactionHash: hash })),
+  }
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

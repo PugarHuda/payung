@@ -168,3 +168,9 @@ fieldset.field legend { font-size: 0.9rem; color: var(--mist); padding: 0; margi
 .seg label.on { border-color: var(--ink); background: var(--ink); color: var(--sky); }
 .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .seg label:has(input:focus-visible) { outline: 3px solid var(--turmeric); outline-offset: 2px; }
+
+/* Share price since launch: one quiet line, the caption carries the numbers */
+.history { margin: 0 0 1.75rem; max-width: 760px; }
+.history svg { width: 100%; height: 60px; display: block; }
+.history polyline { fill: none; stroke: var(--ink); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.history figcaption { font-size: 0.9rem; color: var(--mist); margin-top: 6px; }

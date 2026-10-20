@@ -11,7 +11,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 
 **Target group:** Mezo MUSD borrowers who keep BTC long-term and fear a sharp drop (desktop and mobile web, intermediate DeFi users), and MUSD holders who want yield that isn't tied to LP or Stability Pool risk. Track 1: makes MUSD productive capital, and makes Mezo Borrow safer to use at higher LTV.
 
-**Tech stack:** Solidity 0.8.24, Foundry (30 unit/fuzz tests, 5 invariants over 128k random calls, 2 fork tests against the live MUSD contracts), Slither (0 findings), axe-core, OpenZeppelin ERC-4626, viem, React + Vite, EIP-6963 wallets, Playwright e2e with a real wallet bridge on testnet and a BTC-touch test on an anvil fork of Mezo, Node keeper on a GitHub Actions cron, Blockscout API.
+**Tech stack:** Solidity 0.8.24, Foundry (30 unit/fuzz tests, 5 invariants over 128k random calls, 2 fork tests against the live MUSD contracts), Slither (0 findings), node:test unit tests for the payout decision, axe-core, OpenZeppelin ERC-4626, viem, React + Vite, EIP-6963 wallets, Playwright e2e with a real wallet bridge on testnet and BTC-touch tests on an anvil fork of Mezo (through the app, and the keeper alone), archive reads for share-price history, Node keeper on a GitHub Actions cron, Blockscout API.
 
 **Track:** Track 1 (DeFi)
 

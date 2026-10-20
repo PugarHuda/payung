@@ -97,6 +97,8 @@ cd contracts && slither src/Payung.sol --config-file slither.config.json   # sta
   - **Re-arm on a real nonce.** It then sends a real signed 1 MUSD repay to Mezo, which uses up the nonce. The test checks that the app flags the policy and re-signs it.
   - **Underwriting and account switch.** It deposits and withdraws, and handles a wallet account switch.
   - **A real touch, through the UI** (`e2e/touch.spec.mjs`). It runs an anvil fork of Mezo testnet holding the deployed vault and the real MUSD system, and swaps only `PriceFeed`'s code for one that returns a set price, because anvil can't run Mezo's oracle precompile. The test sets BTC $500 under the policy's strike. It re-signs auto-repay if a past Mezo action used up the nonce. Then it clicks **Trigger it and earn** and checks the caller received exactly the reward. Finally it clicks **Pay out now** and checks the trove's debt fell by the cover.
+  - **The keeper on its own** (same file). It runs the real `keeper/keeper.mjs --once` against the fork as an outside account, after the price dips under the highest live strike. Then it checks that every expiry selling that strike was triggered, that the keeper got exactly the trigger rewards, and that every policy on it was paid: into the loan when its signature still holds, otherwise into the wallet. The fork is reverted afterwards, so the UI test starts clean.
+- **Unit tests for the payout decision** (`shared/mezo.test.mjs`, `npm run test:unit`, in CI). A claim can't be redone, so only a real revert may send a payout to the wallet. An RPC timeout must throw so the keeper retries.
   - **Read-only checks** (run in CI): no-wallet state, phone width without sideways scroll, keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
 
 CI ([`.github/workflows/test.yml`](.github/workflows/test.yml)) runs unit, fuzz, invariant and fork tests, Slither, lint and the read-only e2e suite on every push.
@@ -106,7 +108,9 @@ The tests found and fixed real bugs:
 - A payout that fell back to the wallet was reported as "into your loan". The message now comes from the `PolicyPaid` event.
 - The raw viem error showed for a wallet out of gas money.
 - Secondary text failed the WCAG contrast minimum.
-- viem's `waitForTransactionReceipt` sometimes never resolved on Mezo's RPC, even for transactions mined in seconds. The shared `waitForReceipt` polls `eth_getTransactionReceipt` instead, and the app shows "Sent, waiting for Mezo to confirm" with the explorer link as soon as a hash exists.
+- Transactions sometimes "never confirmed" even though they were mined in seconds. The cause: Mezo's public RPC is load-balanced, and some of its nodes answer `eth_getTransactionReceipt` with `null` for a mined transaction (we caught one doing it for minutes while the explorer and `eth_getTransactionByHash` showed it mined). A kept-alive connection can stay pinned to such a node. The shared `waitForReceipt` polls the RPC and, after a few seconds, also reads status and logs from the explorer's API. The app shows "Sent, waiting for Mezo to confirm" with the explorer link as soon as a hash exists, and reads the payout's destination from that receipt.
+- The keeper decided whether a volatility sample was due from values read at the start of its pass, but `trigger()` takes a sample too, so a pass that triggered a strike then sent a `poke()` that reverted "too soon" and marked the run failed. It now reads the last sample time and the chain's clock right before deciding.
+- The keeper treated any failed repay dry-run as "the repay would fail", including an RPC timeout, and then paid the wallet instead of the loan. A claim is final, so a slow RPC could cost a borrower their auto-repay. Now only a real revert counts, and a timeout makes the keeper retry on the next tick. The fork test caught this: a repay dry-run on a fork takes more than viem's 10 s default.
 - A strike under the loan's liquidation line was accepted silently, though Mezo would refuse the repay there. The app now warns, and the e2e test checks the warning.
 
 ## Run it
@@ -129,7 +133,7 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 - **Cover period.** One to four weeks, each with its own live quote.
 - **Live pricing.** A premium quote that falls as the expiry nears. It shows the on-chain volatility and the 1% slippage bound.
 - **Payout check.** A warning when the strike sits so low that, even after the payout, the loan would be under 110%. Mezo would refuse that repay.
-- **Underwriter view.** Vault value, utilization, premiums this week and free liquidity. Vault activity is decoded from the Mezo explorer's (Blockscout) log API.
+- **Underwriter view.** Vault value, utilization, premiums this week and free liquidity. A share-price line since launch is read from the vault at 25 past blocks (Mezo's RPC serves archive `eth_call`), with the change since launch and, once a day has passed, the annualised pace. Vault activity is decoded from the Mezo explorer's (Blockscout) log API.
 - **My cover.** Per-policy auto-repay health from a dry-run of Mezo's repay, with a one-click re-sign and **Pay out now** for touched cover.
 - **Anyone can keep.** Touched strikes show a **Trigger it and earn** button with the reward. The underwriter view shows when the price was last sampled, so a stalled keeper is visible.
 - **Payout preview.** The Protect tab shows your collateral ratio at the strike, before and after the payout.

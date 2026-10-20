@@ -24,6 +24,8 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.facts div', { hasText: 'Vault value' })).toContainText('MUSD')
     await expect(page.locator('.activity')).toContainText('Cover bought') // decoded from the explorer's log API
     await expect(page.getByText(/capped at 50% of the vault/)).toBeVisible()
+    // Archive reads of the share price since deployment: 25 samples, starting at 1 MUSD.
+    await expect(page.locator('.history figcaption')).toContainText(/1 pyMUSD: 1\.0000 → \d\.\d{4} MUSD since launch.*at 25 past blocks/)
     expect(errors).toEqual([])
   })
 
@@ -97,7 +99,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.getByText('The smallest cover is 10 MUSD.')).toBeVisible()
     await expect(buy).toBeDisabled()
     await cover.fill('99999999')
-    await expect(page.getByText(/The vault can back .* more this week/)).toBeVisible()
+    await expect(page.getByText(/The vault can back .* more right now/)).toBeVisible()
     await expect(buy).toBeDisabled()
 
     // Strike slider stays inside the 5-30% band the contract accepts.

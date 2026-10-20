@@ -1,8 +1,9 @@
 name: Keeper
 
-# Every 5 minutes, watch for 270 s polling every 10 s: trigger touched strikes (earning the
-# trigger reward), pay policies, sample volatility. Runs queue, so coverage is near-continuous.
-# Uses a dedicated low-balance testnet key (secret KEEPER_KEY); anyone can run the same keeper.
+# Scheduled every 5 minutes (GitHub starts scheduled runs best-effort). Each run watches for
+# 270 s, polling every 10 s: trigger touched strikes (earning the trigger reward), pay policies,
+# sample volatility. Uses a dedicated low-balance testnet key (secret KEEPER_KEY); anyone can run
+# the same keeper.
 on:
   schedule:
     - cron: '*/5 * * * *'

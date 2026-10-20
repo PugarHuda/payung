@@ -184,7 +184,8 @@ export default function App() {
     )
     setMe(mine)
     // The repay dry-run is the slow part; show the table first and fill it in.
-    const problems = await Promise.all(mine.policies.map((p) => (p.problem === undefined ? autoRepayProblem(pub, PAYUNG, p) : null)))
+    // An RPC failure leaves the row on "checking" (undefined) until the next refresh.
+    const problems = await Promise.all(mine.policies.map((p) => (p.problem === undefined ? autoRepayProblem(pub, PAYUNG, p).catch(() => undefined) : null)))
     setMe((m) => (m.policies !== mine.policies ? m : { ...m, policies: mine.policies.map((p, i) => ({ ...p, problem: problems[i] })) }))
   }
 
@@ -347,7 +348,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
 
   // Default: umbrella opens a little above the liquidation line, cover lifts the trove to 150%.
   useEffect(() => {
-    if (strike || !price || (account && me.hasTrove === undefined)) return
+    if (strike || !price || capacity == null || (account && me.hasTrove === undefined)) return
     let s = liq ? roundUp((liq * 108n) / 100n, STEP) : ((price * 90n) / 100n / STEP) * STEP
     if (s < minStrike) s = minStrike
     if (s > maxStrike) s = maxStrike
@@ -355,8 +356,8 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
     if (me.hasTrove) {
       const need = me.debt - (me.coll * s * 100n) / TARGET_CR / WAD
       setCover(need > MIN_COVER ? (roundUp(need, MIN_COVER) / WAD).toString() : '100')
-    } else setCover('100')
-  }, [price, liq, me, account, strike, minStrike, maxStrike])
+    } else setCover(String(capacity >= 100n * WAD || capacity < MIN_COVER ? 100n : capacity / MIN_COVER * 10n)) // no loan: a sample amount the vault can back
+  }, [price, liq, me, account, strike, minStrike, maxStrike, capacity])
 
   const autoRepay = wantRepay && !me.smartAccount // smart accounts can't sign Mezo's ECDSA repay
   const coverWei = parseAmount(cover)
@@ -448,7 +449,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           {coverError && <em className="warn">{coverError}</em>}
           {tooBig && (capacity < MIN_COVER
             ? <em className="warn">The vault's cover is fully booked. Capacity grows when underwriters deposit or when cover expires (next on {date(chain.expiry)}).</em>
-            : <em className="warn">The vault can back {musd(capacity, 0)} more this week. Lower the cover.</em>)}
+            : <em className="warn">The vault can back {musd(capacity, 0)} more right now. Lower the cover.</em>)}
         </label>
 
         {me.hasTrove && strike && coverWei > 0n && autoRepay && me.debt > coverWei && (
@@ -494,11 +495,14 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   )
 }
 
+const HISTORY_POINTS = 24
+const ONE_SHARE = 10n ** 24n // 1 pyMUSD: 18 decimals plus the vault's 6-decimal virtual offset
 const VAULT_EVENTS = new Set(['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit', 'Withdraw', 'VolatilityObserved', 'AutoRepayUpdated'])
 
 function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, canWrite }) {
   const [amount, setAmount] = useState('')
   const [activity, setActivity] = useState()
+  const [history, setHistory] = useState(PAYUNG === ADDR.payung ? undefined : null) // dev override: deployment block unknown
   const wei = parseAmount(amount)
   const sharePrice = chain.supply ? (Number(chain.nav) / Number(chain.supply)) * 1e6 : 1 // 6-decimal virtual offset
   const backing = chain.balance != null ? chain.balance - chain.owed : null
@@ -528,6 +532,22 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
     return () => clearInterval(t)
   }, [])
 
+  useEffect(() => {
+    if (PAYUNG !== ADDR.payung) return
+    // Mezo's RPC serves archive reads: the price of 1 pyMUSD at evenly spaced blocks since deployment.
+    pub.getBlockNumber().then(async (head) => {
+      const from = ADDR.payungBlock
+      const blocks = [...new Set(Array.from({ length: HISTORY_POINTS + 1 }, (_, i) => from + ((head - from) * BigInt(i)) / BigInt(HISTORY_POINTS)))]
+      setHistory(await Promise.all(blocks.map(async (blockNumber) => {
+        const [assets, block] = await Promise.all([
+          pub.readContract({ address: PAYUNG, abi: payungAbi, functionName: 'convertToAssets', args: [ONE_SHARE], blockNumber }),
+          pub.getBlock({ blockNumber }),
+        ])
+        return { t: Number(block.timestamp), p: Number(formatUnits(assets, 18)) }
+      })))
+    }).catch(() => setHistory(null))
+  }, [])
+
   return (
     <main className="underwrite">
       <h1>Earn MUSD by backing Bitcoin borrowers.</h1>
@@ -545,6 +565,8 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
         <div><dt>BTC volatility (on-chain)</dt><dd>{pct(chain.vol, 0)}</dd></div>
         <div><dt>Last price sample</dt><dd>{chain.observedAt == null ? '…' : chain.observedAt === 0n ? 'none yet' : ago(chain.observedAt)}</dd></div>
       </dl>
+
+      <SharePrice history={history} />
 
       {chain.touchable?.length > 0 && (
         <div className="banner ok">
@@ -635,7 +657,7 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
       const [upper, lower] = tryLoan ? await repayHints(pub, p.holder, p.cover) : [ZERO, ZERO]
       const hash = await write(PAYUNG, payungAbi, 'claim', [p.id, upper, lower])
       // Report where the MUSD actually went (the contract falls back to the wallet if Mezo refuses the repay).
-      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: (await pub.getTransactionReceipt({ hash })).logs })
+      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: (await waitForReceipt(pub, hash)).logs })
       return { hash, text: `Paid ${musd(p.cover, 0)} ${paid?.args.repaidTrove ? 'into your loan' : 'to your wallet (Mezo did not accept the repay signature)'}.` }
     })
 
@@ -689,6 +711,32 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
 }
 
 /** Vertical price shaft: where BTC is, where the umbrella opens, where liquidation sits. */
+function SharePrice({ history }) {
+  if (history === undefined) return <p className="lede">Reading the share price history from Mezo…</p>
+  if (!history || history.length < 2) return null
+  const first = history[0]
+  const last = history.at(-1)
+  const change = last.p / first.p - 1
+  const days = (last.t - first.t) / 86400
+  const lo = Math.min(...history.map((h) => h.p))
+  const hi = Math.max(...history.map((h) => h.p))
+  const x = (t) => ((t - first.t) / (last.t - first.t || 1)) * 300
+  const y = (p) => 56 - ((p - lo) / (hi - lo || 1)) * 52
+  const fmt = (v) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`
+  return (
+    <figure className="history">
+      <svg viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label={`1 pyMUSD went from ${first.p.toFixed(4)} to ${last.p.toFixed(4)} MUSD since ${date(first.t)}`}>
+        <polyline points={history.map((h) => `${x(h.t).toFixed(1)},${y(h.p).toFixed(1)}`).join(' ')} />
+      </svg>
+      <figcaption>
+        1 pyMUSD: {first.p.toFixed(4)} → {last.p.toFixed(4)} MUSD since launch on {date(first.t)} ({fmt(change)}
+        {/* ponytail: annualising a few hours of premiums would print a silly number */}
+        {days >= 1 ? `, ${fmt((1 + change) ** (365 / days) - 1)} a year at this pace` : ''}). Read from the vault at {history.length} past blocks.
+      </figcaption>
+    </figure>
+  )
+}
+
 function Gauge({ price, strike, liq }) {
   if (!price) return <div className="gauge empty">Reading the Mezo price feed…</div>
   const top = Number(price) * 1.04
@@ -720,8 +768,8 @@ function Line({ y, label, value, cls }) {
   return (
     <g className={`mark ${cls}`}>
       <line x1="30" x2="122" y1={py} y2={py} />
-      <text x="130" y={py - 3}>{value}</text>
-      <text x="130" y={py + 11} className="sub">{label}</text>
+      <text x="144" y={py - 3}>{value}</text>
+      <text x="144" y={py + 11} className="sub">{label}</text>
     </g>
   )
 }

@@ -31,6 +31,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx oxlint app/src
+      - run: npm run test:unit
       - run: npx playwright install --with-deps chromium
       - name: End-to-end, read-only (no wallet key in CI)
         run: npx playwright test -g "without a wallet"

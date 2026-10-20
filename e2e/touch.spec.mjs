@@ -14,7 +14,10 @@ import { mezoTestnet, ADDR, payungAbi, mezoAbi } from '../shared/mezo.js'
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 const RPC = 'http://127.0.0.1:8786'
 const APP = 'http://localhost:4784/'
-const RETURN_SLOT0 = '0x60005460005260206000f3' // runtime: return sload(0) for any call
+// anvil's first dev account, funded on every fork: plays an outside keeper
+const ANVIL_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+const ANVIL_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+const RETURN_SLOT0 ='0x60005460005260206000f3' // runtime: return sload(0) for any call
 const procs = []
 
 const start = (cmd, env = {}) => {
@@ -58,6 +61,54 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
         if (process.platform === 'win32') execSync(`taskkill /pid ${p.pid} /T /F`, { stdio: 'ignore' })
         else p.kill()
       } catch {}
+    }
+  })
+
+  // The keeper is what pays people who aren't watching: run the real keeper.mjs against the fork
+  // and check it triggers every touched strike and pays every policy on them. Reverted afterwards,
+  // so the app test below starts from the same state.
+  test('the keeper triggers and pays a touch on its own', async () => {
+    test.setTimeout(600_000)
+    const snapshot = await fork.request({ method: 'evm_snapshot' })
+    try {
+      const read = (functionName, args = []) => fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName, args })
+      const now = BigInt(Math.floor(Date.now() / 1000))
+      const count = await read('policyCount')
+      const live = []
+      for (let id = 0n; id < count; id++) {
+        const p = await read('policy', [id])
+        if (!p.claimed && p.expiry > now) live.push({ id, ...p })
+      }
+      expect(live.length).toBeGreaterThan(0)
+      const top = live.reduce((a, b) => (b.strike > a.strike ? b : a)).strike
+      await setPrice(String(Number(top / 10n ** 18n) - 500)) // only the highest live strike is touched
+      const touched = live.filter((p) => p.strike === top)
+      const before = await Promise.all(touched.map((p) => fork.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [p.holder] })))
+      const walletBefore = await Promise.all(touched.map((p) => fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [p.holder] })))
+      const keeperBefore = await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [ANVIL_ADDR] })
+
+      const out = execSync('node keeper/keeper.mjs --once', { env: { ...process.env, KEEPER_KEY: ANVIL_KEY, MEZO_RPC: RPC }, encoding: 'utf8' })
+      console.log(out.trim())
+
+      let reward = 0n
+      for (const e of new Set(touched.map((p) => p.expiry))) {
+        const [cover, triggered] = await read('strikes', [e, top])
+        expect(triggered).toBe(true)
+        reward += await read('triggerReward', [cover])
+      }
+      const keeperAfter = await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [ANVIL_ADDR] })
+      expect(keeperAfter - keeperBefore).toBe(reward) // the keeper earns the trigger reward
+      for (const [i, p] of touched.entries()) {
+        expect((await read('policy', [p.id])).claimed).toBe(true)
+        // Paid into the loan (debt falls by the cover) or, when Mezo can't take the repay, to the wallet.
+        const [, principal, interest] = await fork.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [p.holder] })
+        const repaid = before[i][1] + before[i][2] - (principal + interest)
+        const toWallet = (await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [p.holder] })) - walletBefore[i]
+        expect(repaid + toWallet).toBeGreaterThanOrEqual(p.cover - 10n ** 15n)
+        if (p.autoRepay && !out.includes(`policy ${p.id}: repay would fail`)) expect(repaid).toBeGreaterThanOrEqual(p.cover - 10n ** 15n)
+      }
+    } finally {
+      await fork.request({ method: 'evm_revert', params: [snapshot] })
     }
   })
 

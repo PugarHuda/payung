@@ -1,6 +1,6 @@
 // Payung keeper: triggers touched strikes, pays policies (into troves when pre-signed) and feeds
 // the on-chain volatility estimate. Every action is permissionless; anyone can run this. Usage:
-//   KEEPER_KEY=0x... PAYUNG=0x... node keeper.mjs [--once | --for <seconds>]
+//   KEEPER_KEY=0x... [PAYUNG=0x...] [MEZO_RPC=http://...] node keeper.mjs [--once | --for <seconds>]
 // --once runs a single pass; --for keeps polling for that long and exits (the GitHub Actions
 // cron in .github/workflows/keeper.yml runs --for 270 every 5 minutes: near-continuous watch).
 import { createPublicClient, createWalletClient, http, formatUnits } from 'viem'
@@ -9,8 +9,9 @@ import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, wa
 
 const payung = process.env.PAYUNG ?? ADDR.payung
 const account = privateKeyToAccount(process.env.KEEPER_KEY)
-const pub = createPublicClient({ chain: mezoTestnet, transport: http() })
-const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http() })
+const rpc = http(process.env.MEZO_RPC, { timeout: 60_000 }) // unset: Mezo testnet's public RPC; a repay dry-run can take a while
+const pub = createPublicClient({ chain: mezoTestnet, transport: rpc })
+const wallet = createWalletClient({ account, chain: mezoTestnet, transport: rpc })
 const read = (functionName, args = []) => pub.readContract({ address: payung, abi: payungAbi, functionName, args })
 const ZERO = '0x0000000000000000000000000000000000000000'
 const POLL_MS = Number(process.env.POLL_MS ?? 5_000) // a touch counts only if someone looks while BTC is below the strike
@@ -20,7 +21,7 @@ async function send(functionName, args) {
   const req = { account, address: payung, abi: payungAbi, functionName, args }
   await pub.simulateContract(req) // surface the revert reason instead of burning gas on it
   const hash = await wallet.writeContract({ ...req, gas: GAS })
-  const receipt = await waitForReceipt(pub, hash, { timeout: 60_000 })
+  const receipt = await waitForReceipt(pub, hash)
   console.log(`${functionName}(${args.join(', ')}) -> ${receipt.status} ${mezoTestnet.blockExplorers.default.url}/tx/${hash}`)
 }
 
@@ -28,13 +29,11 @@ let scanFrom = 0n // policies below this index are already paid
 let lastLog = 0
 
 async function tick() {
-  const [price, first, weeks, observedAt] = await Promise.all([
+  const [price, first, weeks] = await Promise.all([
     pub.readContract({ address: ADDR.priceFeed, abi: mezoAbi, functionName: 'fetchPrice' }),
     read('currentExpiry'),
     read('MAX_WEEKS'),
-    read('lastObservedAt'),
   ])
-  const now = BigInt(Math.floor(Date.now() / 1000))
 
   // A touch hits every live expiry that sold the strike; each is its own trigger (and reward).
   for (let w = 0n; w < weeks; w++) {
@@ -62,6 +61,9 @@ async function tick() {
   }
   scanFrom = allPaidBelow
 
+  // Read these last: trigger() above also takes a sample. Chain time, not this machine's clock,
+  // because poke() checks block.timestamp.
+  const [observedAt, { timestamp: now }] = await Promise.all([read('lastObservedAt'), pub.getBlock()])
   if (now - observedAt >= OBSERVE_INTERVAL) await send('poke', [])
 
   if (Date.now() - lastLog > 60_000) {

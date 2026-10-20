@@ -11,6 +11,7 @@
     "build": "npm run build -w app",
     "test:contracts": "cd contracts && forge test --no-match-contract Fork",
     "test:fork": "cd contracts && forge test --match-contract PayungFork --fork-url https://rpc.test.mezo.org",
+    "test:unit": "node --test shared/mezo.test.mjs",
     "test:e2e": "playwright test"
   },
   "type": "module",
