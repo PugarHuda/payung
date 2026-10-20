@@ -72,7 +72,7 @@ KEEPER_KEY=0x... npm run keeper               # triggers touched strikes, pays p
 cd contracts && forge script script/Deploy.s.sol --rpc-url mezo_testnet --broadcast --private-key $PRIVATE_KEY
 ```
 
-The app reads the vault address from `shared/mezo.js` or from `?vault=0x…`.
+The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides it in `npm run dev` only).
 
 ## Known limits (deliberate, Wave 1)
 
@@ -88,4 +88,4 @@ The app reads the vault address from `shared/mezo.js` or from `?vault=0x…`.
 
 ## Team
 
-- _Your name_: product, contracts, app ([X](https://x.com/) � [LinkedIn](https://linkedin.com/))
+- _Your name_: product, contracts, app ([X](https://x.com/) · [LinkedIn](https://linkedin.com/))
