@@ -1,5 +1,5 @@
 // Shared by the keeper and the app. Mezo testnet (matsnet) addresses from github.com/mezo-org/musd.
-import { defineChain, parseAbi, ContractFunctionRevertedError } from 'viem'
+import { defineChain, parseAbi, parseEventLogs, toEventSelector, getAbiItem, ContractFunctionRevertedError } from 'viem'
 import payungAbi from '../payung.abi.json' with { type: 'json' }
 
 export const mezoTestnet = defineChain({
@@ -16,6 +16,7 @@ export const ADDR = {
   payungBlock: 16259876n, // deployment block: share-price history starts here
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
+  oracle: '0x7b7c000000000000000000000000000000000015', // PriceFeed.oracle(): Mezo's Skip Connect precompile
   troveManager: '0xE47c80e8c23f6B4A1aE41c34837a0599D5D16bb0',
   sigs: '0xD757e3646AF370b15f32EB557F0F8380Df7D639e',
   hintHelpers: '0x4e4cBA3779d56386ED43631b4dCD6d8EacEcBCF6',
@@ -26,6 +27,7 @@ export { payungAbi }
 
 export const mezoAbi = parseAbi([
   'function fetchPrice() view returns (uint256)',
+  'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
   'function balanceOf(address) view returns (uint256)',
   'function allowance(address,address) view returns (uint256)',
   'function approve(address,uint256) returns (bool)',
@@ -127,6 +129,20 @@ export async function explorerReceipt(hash) {
     status: tx.status === 'ok' ? 'success' : 'reverted',
     logs: items.map((l) => ({ address: l.address.hash, topics: l.topics.filter(Boolean), data: l.data, logIndex: l.index, transactionHash: hash })),
   }
+}
+
+/// Every `eventName` log a contract emitted since `fromBlock`, decoded. Mezo's RPC caps eth_getLogs
+/// at 10,000 blocks (~13 h); the explorer's Etherscan-style getLogs takes the whole range, one topic.
+/// ponytail: the explorer returns at most 1,000 logs per call; page by block when one event outgrows it.
+export async function explorerLogs(address, abi, eventName, fromBlock) {
+  const topic0 = toEventSelector(getAbiItem({ abi, name: eventName }))
+  const { result, message } = await fetch(`${EXPLORER_API.replace('/v2', '')}?module=logs&action=getLogs&address=${address}&topic0=${topic0}&fromBlock=${fromBlock}&toBlock=latest`).then((r) => r.json())
+  if (!Array.isArray(result)) throw new Error(`explorer getLogs: ${message}`) // "No logs found" still comes with []
+  return parseEventLogs({
+    abi,
+    eventName,
+    logs: result.map((l) => ({ address: l.address, topics: l.topics.filter(Boolean), data: l.data, blockNumber: BigInt(l.blockNumber), logIndex: Number(l.logIndex), transactionHash: l.transactionHash, timestamp: Number(l.timeStamp) })),
+  })
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

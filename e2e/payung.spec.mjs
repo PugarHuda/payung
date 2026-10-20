@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { parseUnits } from 'viem'
 import { installWallet } from './wallet.mjs'
-import { ADDR, mezoAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
+import { ADDR, mezoAbi, payungAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 
@@ -23,6 +23,9 @@ test.describe('without a wallet', () => {
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     await expect(page.locator('.facts div', { hasText: 'Vault value' })).toContainText('MUSD')
     await expect(page.locator('.activity')).toContainText('Cover bought') // decoded from the explorer's log API
+    // Every event since deployment, newest first, without the 15-minute volatility samples.
+    await expect(page.locator('.activity li').first()).toContainText(/ago|just now/)
+    await expect(page.locator('.activity')).not.toContainText('Volatility sample')
     await expect(page.getByText(/capped at 50% of the vault/)).toBeVisible()
     // Archive reads of the share price since deployment: 25 samples, starting at 1 MUSD.
     await expect(page.locator('.history figcaption')).toContainText(/1 pyMUSD: 1\.0000 → \d\.\d{4} MUSD since launch.*at 25 past blocks/)
@@ -79,6 +82,8 @@ test.describe('with a wallet on Mezo testnet', () => {
     expect(w.state.chainId).toBe(31611)
     await expect(page.locator('.facts div', { hasText: 'Your loan' })).toContainText('MUSD')
     await expect(page.locator('.facts div', { hasText: 'Liquidation at' })).toContainText('$')
+    await expect(page.locator('.facts div', { hasText: 'BTC now' })).toContainText(/\$[\d,]+ \((\d+ min ago|just now)\)/) // oracle's updatedAt
+    await expect(page.locator('.facts div', { hasText: 'Collateral ratio' })).toContainText(/\d+% \(BTC \d+% above liquidation\)/)
 
     // Wrong network mid-session blocks writes until switched back.
     await page.evaluate(() => window.__emitWallet('chainChanged', '0x1'))
@@ -112,15 +117,20 @@ test.describe('with a wallet on Mezo testnet', () => {
     for (let i = 0; i < 10; i++) await page.keyboard.press('ArrowRight')
 
     // Underwrite first: withdraw 20 MUSD of free liquidity (funds the wallet for the run), then
-    // deposit 10 back, which also adds backing capacity for the cover bought next.
+    // deposit back, which also adds backing capacity for the cover bought next. Every run locks
+    // another 25 MUSD for two weeks, so deposit enough that 30 MUSD of capacity is free (50% of a deposit).
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     const amountBox = page.getByLabel('Amount (MUSD)')
     await amountBox.fill('20')
     await page.getByRole('button', { name: 'Withdraw' }).click()
     await expect(page.getByRole('status')).toContainText('Withdrew 20 MUSD.', { timeout: 180_000 })
-    await amountBox.fill('10')
+    const capacity = Number(await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })) / 1e18
+    const topUp = Math.max(10, Math.ceil(((30 - capacity) * 2) / 10) * 10)
+    await amountBox.fill(String(topUp))
     await page.getByRole('button', { name: 'Deposit' }).click()
-    await expect(page.getByRole('status')).toContainText('Deposited 10 MUSD.', { timeout: 180_000 })
+    await expect(page.getByRole('status')).toContainText(`Deposited ${topUp} MUSD.`, { timeout: 180_000 })
+    // Earnings come from this wallet's Deposit/Withdraw events since the vault launched.
+    await expect(page.getByText(/Earned so far: [+−][\d.,]+ MUSD on [\d,]+ MUSD deposited/)).toBeVisible({ timeout: 60_000 })
     await page.getByRole('button', { name: 'Protect my loan' }).click()
     await cover.fill('25')
     // A strike under the liquidation line: the app warns that Mezo would refuse the repay.
@@ -162,6 +172,11 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(row).toContainText('Active')
     await expect(row).toContainText('Loan, repay checked', { timeout: 120_000 })
     await expect(page.getByText(/Browser alerts are on/)).toBeVisible()
+    // Expiry reminder: an RFC 5545 event at the policy's expiry with an alarm a day before.
+    const ics = decodeURIComponent((await row.getByRole('link', { name: 'Add to calendar' }).getAttribute('href')).split(',').slice(1).join(','))
+    expect(ics).toMatch(/BEGIN:VEVENT\r\n.*DTSTART:\d{8}T000000Z\r\n/s) // Thursday 00:00 UTC
+    expect(ics).toContain('TRIGGER:-P1D')
+    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 25 MUSD\)/) // commas escaped per RFC 5545
 
     // Another Mezo signature action (a signed 1 MUSD repay) uses up the nonce: the app spots it and re-signs.
     const nonce = await w.pub.readContract({ address: ADDR.sigs, abi: mezoAbi, functionName: 'getNonce', args: [w.account.address] })

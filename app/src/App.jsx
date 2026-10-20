@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, decodeEventLog, parseEventLogs } from 'viem'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, EXPLORER_API, GAS } from '../../shared/mezo.js'
+import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, parseEventLogs } from 'viem'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
 import './App.css'
 
 // ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
@@ -15,7 +15,7 @@ const CCR = 150n // in recovery mode (system ratio under 150%) loans under 150% 
 const TARGET_CR = 150n // cover sized to lift the trove back to 150% at the strike
 const WEEK = 604800n
 const MAX_WEEKS = 4 // the contract sells cover to this week's expiry or up to 3 weeks after
-const SLIPPAGE = 101n // accept a premium up to 1% above the quote
+const SLIPPAGE = 103n // accept a premium up to 3% above the quote: near strikes move ~25x as much as BTC
 const ALERT_BAND = 103n // notify when BTC is within 3% of an active strike
 const EXPLORER = mezoTestnet.blockExplorers.default.url
 // VITE_MEZO_RPC points the app at another node, e.g. the anvil fork the touch e2e test runs.
@@ -29,7 +29,7 @@ const roundUp = (v, step) => ((v + step - 1n) / step) * step
 const nowSec = () => BigInt(Math.floor(Date.now() / 1000))
 const ago = (t) => {
   const m = Math.round(Number(nowSec() - t) / 60)
-  return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`
+  return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`
 }
 const left = (t) => {
   const s = Number(t - nowSec())
@@ -140,14 +140,14 @@ export default function App() {
   }, [account])
 
   const load = async () => {
-    const price = await readM(ADDR.priceFeed, 'fetchPrice').catch(() => null)
-    const [nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt] = await Promise.all([
+    const [price, round] = await Promise.all([readM(ADDR.priceFeed, 'fetchPrice').catch(() => null), readM(ADDR.oracle, 'latestRoundData').catch(() => null)])
+    const [nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, paused] = await Promise.all([
       readP('totalAssets'), readP('freeLiquidity'), readP('coverCapacity'), readP('totalLocked'),
       readP('currentExpiry'), readP('totalSupply'), readP('volatility'), readP('maxUtilization'),
       readM(ADDR.musd, 'balanceOf', [PAYUNG]), readP('totalOwed'),
       price ? readM(ADDR.troveManager, 'checkRecoveryMode', [price]) : null,
       price ? readM(ADDR.troveManager, 'getTCR', [price]) : null,
-      readP('lastObservedAt'),
+      readP('lastObservedAt'), readP('paused'),
     ])
     // Strikes BTC is at or under that nobody has triggered yet, in every live expiry:
     // anyone can trigger them and earn the reward.
@@ -160,7 +160,7 @@ export default function App() {
         if (!triggered) touchable.push({ expiry: e, strike, cover, reward: await readP('triggerReward', [cover]) })
       }
     }
-    setChain({ price, nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, touchable })
+    setChain({ price, priceAt: round?.[3], nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, paused, touchable })
     if (!account) return
     const [debtColl, status, bal, code, shares, ids] = await Promise.all([
       readM(ADDR.troveManager, 'getEntireDebtAndColl', [account]),
@@ -318,6 +318,7 @@ export default function App() {
         </p>
       )}
       {chain.price === null && <p className="banner error">The Mezo price feed is not answering right now, so new cover and deposits are on hold. Withdrawals, triggers and payouts still work.</p>}
+      {chain.paused && <p className="banner error">The vault owner has paused new cover. Existing cover, triggers, payouts, deposits and withdrawals keep working.</p>}
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
       {notice && <p className={`banner ${notice.kind}`} role="status">{notice.text} {notice.hash && txLink(notice.hash)}</p>}
 
@@ -344,7 +345,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   const [strike, setStrike] = useState()
   const [cover, setCover] = useState('')
   const [wantRepay, setAutoRepay] = useState(true)
-  const [quote, setQuote] = useState()
+  const [lastQuote, setQuote] = useState()
 
   // Default: umbrella opens a little above the liquidation line, cover lifts the trove to 150%.
   useEffect(() => {
@@ -366,9 +367,14 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   useEffect(() => {
     if (!strike || !coverWei || coverWei < MIN_COVER || PAYUNG === ZERO) return setQuote()
     if (!expiry) return
-    readP('quote', [expiry, strike, coverWei]).then(([premium, distance]) => setQuote({ premium, distance })).catch(() => setQuote())
-  }, [expiry, strike, coverWei, readP, price])
+    // Requests race on a slow RPC: only the answer for the current inputs may land.
+    let current = true
+    readP('quote', [expiry, strike, coverWei]).then(([premium, distance]) => current && setQuote({ premium, distance, expiry, strike, cover: coverWei }), () => current && setQuote())
+    return () => { current = false }
+  }, [expiry, strike, coverWei, readP, price, vol]) // vol: a keeper sample reprices without moving BTC
 
+  // Until the quote for the inputs on screen arrives, there is none (no buying on an older one).
+  const quote = lastQuote && lastQuote.expiry === expiry && lastQuote.strike === strike && lastQuote.cover === coverWei ? lastQuote : undefined
   const tooBig = capacity != null && coverWei > capacity
   const cantPay = !!quote && me.bal != null && me.bal < quote.premium
   const leavesTooLittle = me.hasTrove && autoRepay && !!coverWei && me.debt - coverWei < 2000n * WAD
@@ -379,6 +385,12 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
 
   async function buy() {
     await run('buy', async () => {
+      // Check the shown premium still holds before asking for signatures: BTC and volatility move.
+      const [fresh] = await readP('quote', [expiry, strike, coverWei])
+      if (fresh * 100n > quote.premium * SLIPPAGE) {
+        setQuote({ ...quote, premium: fresh })
+        throw new Error(`The premium is now ${musd(fresh)} (it was ${musd(quote.premium)}). Check it and press Buy again.`)
+      }
       const deadline = expiry + 86400n
       const sig = autoRepay ? await signRepay(coverWei, deadline) : '0x'
       const maxPremium = (quote.premium * SLIPPAGE) / 100n
@@ -402,9 +414,12 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
 
         {account && (
           <dl className="facts">
-            <div><dt>BTC now</dt><dd>{usd(price)}</dd></div>
+            <div><dt>BTC now</dt><dd>{usd(price)} {chain.priceAt && <small title="When Mezo's oracle last updated the price">({ago(chain.priceAt)})</small>}</dd></div>
             <div><dt>Your loan</dt><dd>{me.hasTrove ? musd(me.debt, 0) : me.hasTrove === false ? 'No open loan' : '…'}</dd></div>
             <div><dt>Liquidation at</dt><dd className="danger">{liq ? usd(liq) : '—'}</dd></div>
+            {me.hasTrove && price && liq && (
+              <div><dt>Collateral ratio</dt><dd>{ratio(me.coll, price, me.debt)} <small>{liq < price ? `(BTC ${((1 - Number(liq) / Number(price)) * 100).toFixed(0)}% above liquidation)` : '(liquidatable now)'}</small></dd></div>
+            )}
           </dl>
         )}
         {viaRecovery && (
@@ -478,13 +493,13 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         </div>
         <p className="fine">
           Priced from BTC volatility measured on-chain from Mezo's price feed ({pct(vol, 0)} a year) and the {expiry ? left(expiry) : '…'} the cover runs: the longer it runs, the likelier a touch.
-          You pay at most 1% more than this quote.
+          You pay at most 3% more than this quote.
         </p>
         {cantPay && <em className="warn">You have {musd(me.bal)}. Borrow or buy MUSD on Mezo to pay the premium.</em>}
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
         {account ? (
-          <button className="primary wide" disabled={!canWrite || !quote || tooBig || cantPay || !salesOpen || !!coverError || !!busy} onClick={buy}>
+          <button className="primary wide" disabled={!canWrite || !quote || tooBig || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
             {busy === 'buy' ? 'Opening umbrella…' : `Buy cover for ${quote ? musd(quote.premium) : '…'}`}
           </button>
         ) : (
@@ -497,7 +512,8 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
 
 const HISTORY_POINTS = 24
 const ONE_SHARE = 10n ** 24n // 1 pyMUSD: 18 decimals plus the vault's 6-decimal virtual offset
-const VAULT_EVENTS = new Set(['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit', 'Withdraw', 'VolatilityObserved', 'AutoRepayUpdated'])
+// Volatility samples (every 15 min) are left out: they'd bury everything else. The newest shows as "Last price sample".
+const VAULT_EVENTS = ['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit', 'Withdraw', 'AutoRepayUpdated', 'MaxUtilizationUpdated', 'PremiumTableUpdated', 'Paused', 'Unpaused']
 
 function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, canWrite }) {
   const [amount, setAmount] = useState('')
@@ -508,25 +524,18 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
   const backing = chain.balance != null ? chain.balance - chain.owed : null
   const utilization = backing ? (chain.locked * WAD) / backing : 0n
   const weekPremiums = activity?.filter((a) => a.eventName === 'PolicyBought' && a.args.expiry > nowSec()).reduce((s, a) => s + a.args.premium, 0n)
+  // Earned = what the position is worth now + what was withdrawn - what was deposited (pyMUSD sent
+  // to or from other wallets isn't counted).
+  const mine = (name, who) => activity?.filter((a) => a.eventName === name && a.args.owner.toLowerCase() === who).reduce((s, a) => s + a.args.assets, 0n) ?? 0n
+  const deposited = account ? mine('Deposit', account.toLowerCase()) : 0n
+  const earned = me.assets != null && deposited > 0n ? me.assets + mine('Withdraw', account.toLowerCase()) - deposited : null
 
   useEffect(() => {
-    // ponytail: first page of the explorer's log index (50 events); paginate when the vault is busier.
+    // Every vault event since deployment (not just the explorer's 50 newest), newest first.
     const load = () =>
-      fetch(`${EXPLORER_API}/addresses/${PAYUNG}/logs`)
-        .then((r) => r.json())
-        .then(({ items }) =>
-          setActivity(
-            items.flatMap((l) => {
-              try {
-                const ev = decodeEventLog({ abi: payungAbi, topics: l.topics.filter(Boolean), data: l.data })
-                return VAULT_EVENTS.has(ev.eventName) ? [{ ...ev, hash: l.transaction_hash, block: l.block_number, index: l.index }] : []
-              } catch {
-                return []
-              }
-            }),
-          ),
-        )
-        .catch(() => setActivity(null))
+      Promise.all(VAULT_EVENTS.map((e) => explorerLogs(PAYUNG, payungAbi, e, PAYUNG === ADDR.payung ? ADDR.payungBlock : 0n)))
+        .then((lists) => setActivity(lists.flat().sort((a, b) => (b.blockNumber === a.blockNumber ? b.logIndex - a.logIndex : b.blockNumber > a.blockNumber ? 1 : -1))))
+        .catch(() => setActivity((a) => a ?? null)) // a failed refresh keeps the last good list
     load()
     const t = setInterval(load, 30_000)
     return () => clearInterval(t)
@@ -584,7 +593,10 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
 
       {account ? (
         <div className="split">
-          <p>Your position: <strong>{musd(me.assets)}</strong>. Wallet: {musd(me.bal)}.</p>
+          <p>
+            Your position: <strong>{musd(me.assets)}</strong>. Wallet: {musd(me.bal)}.
+            {earned != null && <> Earned so far: <strong className="earned">{earned >= 0n ? '+' : '−'}{musd(earned >= 0n ? earned : -earned, 4)}</strong> on {musd(deposited, 0)} deposited.</>}
+          </p>
           <label className="field">
             <span>Amount (MUSD)</span>
             <input inputMode="decimal" value={amount} aria-invalid={wei === null} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} />
@@ -616,8 +628,8 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
       {activity?.length > 0 && (
         <ul className="activity">
           {activity.slice(0, 12).map((a) => (
-            <li key={`${a.hash}-${a.index}`}>
-              <span>{describe(a)}</span> <a href={`${EXPLORER}/tx/${a.hash}`} target="_blank" rel="noreferrer">block {a.block}</a>
+            <li key={`${a.transactionHash}-${a.logIndex}`}>
+              <span>{describe(a)}</span> <a href={`${EXPLORER}/tx/${a.transactionHash}`} target="_blank" rel="noreferrer">{ago(BigInt(a.timestamp))}</a>
             </li>
           ))}
         </ul>
@@ -635,6 +647,10 @@ function describe({ eventName, args }) {
     case 'Withdraw': return `Underwriter withdrew ${musd(args.assets, 0)}`
     case 'VolatilityObserved': return `Volatility sample: BTC ${usd(args.price)}, vol ${pct(args.volatility, 0)}`
     case 'AutoRepayUpdated': return `Policy ${args.id} auto-repay ${args.autoRepay ? 're-signed' : 'turned off'}`
+    case 'MaxUtilizationUpdated': return `Owner set the cover cap to ${Number(args.bps) / 100}% of the vault`
+    case 'PremiumTableUpdated': return 'Owner updated the premium table'
+    case 'Paused': return 'Owner paused new cover'
+    case 'Unpaused': return 'Owner resumed new cover'
   }
 }
 
@@ -685,7 +701,9 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
                 <tr key={p.id}>
                   <td>{usd(p.strike)}</td>
                   <td>{musd(p.cover, 0)}</td>
-                  <td>{date(p.expiry)}{p.live && !p.triggered && <small> · {left(p.expiry)} left</small>}</td>
+                  <td>
+                    {date(p.expiry)}{p.live && !p.triggered && <small> · {left(p.expiry)} left <a href={calendar(p)} download={`payung-cover-${p.id}.ics`}>Add to calendar</a></small>}
+                  </td>
                   <td>
                     {!p.autoRepay ? 'Wallet' : !p.live ? 'Loan' : p.problem === undefined ? 'Loan (checking the repay…)' : p.problem ? (
                       <>
@@ -708,6 +726,20 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
       )}
     </main>
   )
+}
+
+/** An .ics event at the cover's expiry with a reminder a day before, to decide whether to renew. */
+function calendar(p) {
+  const stamp = (t) => new Date(Number(t) * 1000).toISOString().replace(/[-:]|\.\d{3}/g, '')
+  const ics = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Payung//Cover//EN', 'BEGIN:VEVENT',
+    `UID:payung-${PAYUNG}-${p.id}`, `DTSTAMP:${stamp(nowSec())}`, `DTSTART:${stamp(p.expiry)}`, `DTEND:${stamp(p.expiry)}`,
+    `SUMMARY:${`Payung cover ends (${usd(p.strike)} strike, ${musd(p.cover, 0)})`.replace(/[,;\\]/g, '\\$&')}`, // RFC 5545 text escaping
+    `DESCRIPTION:Your liquidation cover ends now. Renew at ${location.origin}${location.pathname}`,
+    'BEGIN:VALARM', 'TRIGGER:-P1D', 'ACTION:DISPLAY', 'DESCRIPTION:Payung cover ends tomorrow', 'END:VALARM',
+    'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n')
+  return `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`
 }
 
 /** Vertical price shaft: where BTC is, where the umbrella opens, where liquidation sits. */

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { BaseError, ContractFunctionRevertedError, TimeoutError } from 'viem'
-import { autoRepayProblem, explorerReceipt, mezoAbi } from './mezo.js'
+import { autoRepayProblem, explorerReceipt, explorerLogs, mezoAbi } from './mezo.js'
 
 const policy = { autoRepay: true, holder: '0x' + '1'.repeat(40), cover: 10n ** 20n, signature: '0x', sigDeadline: 2n ** 40n }
 const client = (simulate) => ({
@@ -39,4 +39,13 @@ test('the explorer fallback reads a mined transaction', async () => {
   assert.equal(r.status, 'success')
   assert.equal(r.blockNumber, 16261706n)
   assert.equal(r.logs[0].topics[0], '0xa324ec4bc92baa5a400c1d703b5385d493b731b33f31bb690a2c90179bbe5d77') // VolatilityObserved
+})
+
+// Live check: the explorer's whole-range getLogs returns the vault's cover sales, decoded.
+test('explorerLogs reads every PolicyBought since deployment', async () => {
+  const { payungAbi, ADDR } = await import('./mezo.js')
+  const logs = await explorerLogs(ADDR.payung, payungAbi, 'PolicyBought', ADDR.payungBlock)
+  assert.ok(logs.length >= 7)
+  assert.ok(logs.every((l) => l.eventName === 'PolicyBought' && l.args.premium > 0n && l.timestamp > 0))
+  assert.equal(logs[0].transactionHash, '0xa424f08e0c5ec3625a67798a0d84d815d572a502468b25b56a9201f4c41c007c') // first sale on v4
 })
