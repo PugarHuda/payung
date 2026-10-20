@@ -1,0 +1,7 @@
+.playwright-mcp/
+node_modules/
+.env
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31611/run-*.json
+dist/

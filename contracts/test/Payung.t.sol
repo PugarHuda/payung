@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Payung, IPriceFeed, IBorrowerOperationsSignatures} from "../src/Payung.sol";
+
+contract MockMUSD is ERC20("MUSD", "MUSD") {
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function burn(address from, uint256 amount) external {
+        _burn(from, amount);
+    }
+}
+
+contract MockPriceFeed is IPriceFeed {
+    uint256 public price = 100_000e18;
+    bool public stale;
+
+    function set(uint256 p) external {
+        price = p;
+    }
+
+    function setStale(bool s) external {
+        stale = s;
+    }
+
+    function fetchPrice() external view returns (uint256) {
+        require(!stale, "PriceFeed: Oracle is stale.");
+        return price;
+    }
+}
+
+/// Burns MUSD from the caller like Mezo's BorrowerOperations; `fail` simulates a voided signature.
+contract MockSigs is IBorrowerOperationsSignatures {
+    MockMUSD public musd;
+    bool public fail;
+    mapping(address => uint256) public repaid;
+
+    constructor(MockMUSD m) {
+        musd = m;
+    }
+
+    function setFail(bool f) external {
+        fail = f;
+    }
+
+    function repayMUSDWithSignature(uint256 amount, address, address, address borrower, bytes memory, uint256)
+        external
+    {
+        require(!fail, "BorrowerOperationsSignatures: Invalid signature");
+        musd.burn(msg.sender, amount);
+        repaid[borrower] += amount;
+    }
+}
+
+contract PayungTest is Test {
+    MockMUSD musd;
+    MockPriceFeed feed;
+    MockSigs sigs;
+    Payung vault;
+
+    address lp = makeAddr("lp");
+    address lp2 = makeAddr("lp2");
+    address alice = makeAddr("alice");
+    address bob = makeAddr("bob");
+
+    function setUp() public {
+        vm.warp(1_760_000_000); // a Monday-ish timestamp, far from the epoch cutoff
+        musd = new MockMUSD();
+        feed = new MockPriceFeed();
+        sigs = new MockSigs(musd);
+        vault = new Payung(musd, feed, sigs, address(this));
+
+        for (uint256 i; i < 4; ++i) {
+            address u = [lp, lp2, alice, bob][i];
+            musd.mint(u, 1_000_000e18);
+            vm.prank(u);
+            musd.approve(address(vault), type(uint256).max);
+        }
+        vm.prank(lp);
+        vault.deposit(100_000e18, lp);
+    }
+
+    function _buy(address who, uint256 strike, uint256 cover, bool autoRepay) internal returns (uint256) {
+        uint256 deadline = vault.currentExpiry() + 1 days;
+        vm.prank(who);
+        return vault.buy(strike, cover, autoRepay, deadline, autoRepay ? bytes("sig") : bytes(""));
+    }
+
+    function test_expiryIsThursdayMidnightUtc() public view {
+        uint256 e = vault.currentExpiry();
+        assertEq(e % 1 weeks, 0);
+        assertEq((e / 1 days + 4) % 7, 4); // 1970-01-01 was a Thursday (weekday 4, Sunday = 0)
+        assertGt(e, block.timestamp);
+    }
+
+    function test_premiumMatchesTableAndIsNavNeutral() public {
+        uint256 navBefore = vault.totalAssets();
+        (uint256 premium, uint256 distance) = vault.quote(90_000e18, 1_000e18);
+        assertEq(distance, 1000);
+        assertEq(premium, 1_000e18 * 1602 / 10_000); // 10% below spot -> table[5]
+        _buy(alice, 90_000e18, 1_000e18, false);
+        assertEq(musd.balanceOf(address(vault)), 100_000e18 + premium);
+        assertApproxEqAbs(vault.totalAssets(), navBefore, 1);
+    }
+
+    function test_interpolatesBetweenTablePoints() public view {
+        assertEq(vault.touchProbability(550), uint256(5191)); // halfway between 5% (5736) and 6% (4645), rounded down
+        assertEq(vault.touchProbability(3000), 25);
+        assertEq(vault.touchProbability(0), 10_000);
+    }
+
+    function test_rejectsBadStrikes() public {
+        vm.startPrank(alice);
+        vm.expectRevert("Payung: bad strike");
+        vault.buy(90_500e18, 100e18, false, 0, "");
+        vm.expectRevert("Payung: strike out of range");
+        vault.buy(97_000e18, 100e18, false, 0, ""); // 3% away
+        vm.expectRevert("Payung: strike out of range");
+        vault.buy(60_000e18, 100e18, false, 0, ""); // 40% away
+        vm.expectRevert("Payung: strike above spot");
+        vault.buy(101_000e18, 100e18, false, 0, "");
+        vm.expectRevert("Payung: bad repay signature");
+        vault.buy(90_000e18, 100e18, true, 0, "sig");
+        vm.stopPrank();
+    }
+
+    function test_cannotSellMoreCoverThanHeld() public {
+        vm.prank(alice);
+        vm.expectRevert("Payung: vault capacity");
+        vault.buy(70_000e18, 200_000e18, false, 0, "");
+    }
+
+    function test_noSalesInLastHour() public {
+        vm.warp(vault.currentExpiry() - 30 minutes);
+        vm.prank(alice);
+        vm.expectRevert("Payung: sales closed");
+        vault.buy(90_000e18, 100e18, false, 0, "");
+    }
+
+    function test_touchPaysWallet() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, false);
+        vm.expectRevert("Payung: not touched");
+        vault.trigger(90_000e18);
+
+        feed.set(89_900e18);
+        vault.trigger(90_000e18);
+        assertEq(vault.totalOwed(), 1_000e18);
+        assertEq(vault.activeCover(), 0);
+
+        uint256 before = musd.balanceOf(alice);
+        vault.claim(id, address(0), address(0)); // anyone (a keeper) can claim
+        assertEq(musd.balanceOf(alice) - before, 1_000e18);
+        assertEq(vault.totalOwed(), 0);
+
+        vm.expectRevert("Payung: already paid");
+        vault.claim(id, address(0), address(0));
+    }
+
+    function test_touchRepaysTrove() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, true);
+        feed.set(85_000e18);
+        vault.trigger(90_000e18);
+        uint256 walletBefore = musd.balanceOf(alice);
+        vault.claim(id, address(0), address(0));
+        assertEq(sigs.repaid(alice), 1_000e18);
+        assertEq(musd.balanceOf(alice), walletBefore); // went to the trove, not the wallet
+    }
+
+    function test_voidedSignatureFallsBackToWallet() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, true);
+        feed.set(85_000e18);
+        vault.trigger(90_000e18);
+        sigs.setFail(true);
+        uint256 before = musd.balanceOf(alice);
+        vault.claim(id, address(0), address(0));
+        assertEq(musd.balanceOf(alice) - before, 1_000e18);
+    }
+
+    function test_noTouchMeansCoverExpiresAndLpsKeepPremium() public {
+        _buy(alice, 90_000e18, 1_000e18, false);
+        uint256 premium = musd.balanceOf(address(vault)) - 100_000e18;
+        vm.warp(vault.activeExpiry());
+        feed.set(80_000e18); // too late: epoch is over
+        vm.expectRevert("Payung: epoch over");
+        vault.trigger(90_000e18);
+        assertEq(vault.totalAssets(), 100_000e18 + premium);
+        assertEq(vault.freeLiquidity(), 100_000e18 + premium);
+    }
+
+    function test_withdrawLimitedToFreeLiquidity() public {
+        _buy(alice, 90_000e18, 60_000e18, false);
+        uint256 free = vault.freeLiquidity();
+        assertLt(free, 50_000e18);
+        assertEq(vault.maxWithdraw(lp), free);
+        vm.prank(lp);
+        vm.expectRevert();
+        vault.withdraw(free + 1, lp, lp);
+        vm.prank(lp);
+        vault.withdraw(free, lp, lp);
+    }
+
+    function test_navMarksLossBeforeTrigger() public {
+        _buy(alice, 90_000e18, 10_000e18, false);
+        feed.set(90_000e18); // touched but nobody triggered yet
+        assertApproxEqAbs(vault.openLiability(), 10_000e18, 1);
+        // A new LP cannot buy shares that ignore the coming payout.
+        vm.prank(lp2);
+        uint256 shares = vault.deposit(10_000e18, lp2);
+        feed.set(85_000e18);
+        vault.trigger(90_000e18);
+        assertApproxEqRel(vault.convertToAssets(shares), 10_000e18, 1e12);
+    }
+
+    function test_staleOracleBlocksDepositsButNotExits() public {
+        _buy(alice, 90_000e18, 1_000e18, false);
+        feed.setStale(true);
+        vm.prank(lp2);
+        vm.expectRevert("PriceFeed: Oracle is stale.");
+        vault.deposit(1_000e18, lp2);
+        assertEq(vault.openLiability(), 1_000e18); // marked at full cover
+        vm.prank(lp);
+        vault.withdraw(1_000e18, lp, lp);
+    }
+
+    function test_pauseStopsSalesOnly() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, false);
+        vault.pause();
+        vm.prank(bob);
+        vm.expectRevert();
+        vault.buy(90_000e18, 1_000e18, false, 0, "");
+        feed.set(80_000e18);
+        vault.trigger(90_000e18);
+        vault.claim(id, address(0), address(0));
+        vm.prank(lp);
+        vault.withdraw(1_000e18, lp, lp);
+    }
+
+    function test_epochRollResetsLockedCover() public {
+        _buy(alice, 90_000e18, 50_000e18, false);
+        vm.warp(vault.currentExpiry() + 1 hours);
+        _buy(bob, 90_000e18, 50_000e18, false); // old cover no longer locks capital
+        assertEq(vault.activeCover(), 50_000e18);
+    }
+
+    function test_premiumTableGuards() public {
+        uint16[26] memory t;
+        for (uint256 i; i < 26; ++i) t[i] = uint16(5000 - i);
+        vault.setPremiumTable(t);
+        t[3] = 6000;
+        vm.expectRevert("Payung: must be non-increasing");
+        vault.setPremiumTable(t);
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.setPremiumTable(t);
+    }
+
+    function testFuzz_vaultAlwaysSolvent(uint256 strikeK, uint256 cover, uint256 dropBps) public {
+        strikeK = bound(strikeK, 70, 95);
+        cover = bound(cover, 10e18, 50_000e18);
+        dropBps = bound(dropBps, 0, 5000);
+        uint256 id = _buy(alice, strikeK * 1000e18, cover, false);
+        feed.set(100_000e18 * (10_000 - dropBps) / 10_000);
+        if (feed.price() <= strikeK * 1000e18) {
+            vault.trigger(strikeK * 1000e18);
+            vault.claim(id, address(0), address(0));
+        }
+        vm.startPrank(lp);
+        vault.redeem(vault.maxRedeem(lp), lp, lp);
+        vm.stopPrank();
+        assertGe(musd.balanceOf(address(vault)), vault.totalOwed());
+    }
+}

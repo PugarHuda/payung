@@ -1,0 +1,14 @@
+{
+  "name": "payung",
+  "private": true,
+  "workspaces": [
+    "keeper",
+    "app"
+  ],
+  "scripts": {
+    "keeper": "npm run start -w keeper",
+    "dev": "npm run dev -w app",
+    "build": "npm run build -w app"
+  },
+  "type": "module"
+}

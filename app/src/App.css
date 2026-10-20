@@ -1,0 +1,148 @@
+/* Payung: a paper umbrella (payung kertas) over a rain of falling prices.
+   Bold in one place: the price shaft. Everything else is quiet. */
+:root {
+  --sky: #e8eef0; /* rain-washed page */
+  --ink: #1f3440; /* monsoon slate */
+  --rain: #4f8199; /* falling price */
+  --turmeric: #d9a21b; /* the umbrella, the protection */
+  --danger: #a8322a; /* liquidation */
+  --mist: #5e7480; /* secondary text */
+  --card: #f6f9f9;
+  --line: #c7d4d9;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--sky);
+  color: var(--ink);
+  font: 400 1rem/1.55 'Public Sans', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+h1, .brand, .big, .quote strong {
+  font-family: 'Bricolage Grotesque', 'Public Sans', sans-serif;
+  font-optical-sizing: auto;
+}
+
+h1 {
+  font-size: clamp(2rem, 4.4vw, 3.1rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+  margin: 0 0 0.75rem;
+  max-width: 16ch;
+}
+
+.lede { color: var(--mist); max-width: 60ch; margin: 0 0 1.5rem; }
+a { color: inherit; }
+code { background: var(--card); padding: 0 0.3em; border-radius: 4px; }
+
+.shell { max-width: 1120px; margin: 0 auto; padding: 0 20px 48px; }
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 20px 0;
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 8px; font-size: 1.4rem; font-weight: 700; text-decoration: none; }
+.top nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+.acct { font-size: 0.9rem; color: var(--mist); }
+
+button {
+  font: 600 0.95rem/1 'Public Sans', sans-serif;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  padding: 0.75rem 1.1rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--ink); color: var(--sky); }
+button.primary:not(:disabled):hover { background: #2c4a5a; }
+button.wide { width: 100%; padding: 1rem; font-size: 1.05rem; }
+.tab { border-color: transparent; padding: 0.55rem 0.9rem; }
+.tab.on { border-color: var(--ink); }
+:focus-visible { outline: 3px solid var(--turmeric); outline-offset: 2px; }
+
+.banner { background: var(--card); border-left: 4px solid var(--rain); padding: 0.75rem 1rem; margin: 0 0 1.5rem; }
+.banner.error { border-color: var(--danger); }
+.banner.ok { border-color: var(--turmeric); }
+
+main { padding-top: 12px; }
+
+/* Protect: shaft on the left, decision on the right */
+.protect { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 56px; align-items: start; }
+.gauge { width: 100%; height: auto; display: block; }
+.gauge.empty { color: var(--mist); padding: 2rem 0; }
+.gauge .shaft { fill: var(--card); stroke: var(--line); }
+.gauge .drop { stroke: var(--rain); stroke-width: 1.6; stroke-linecap: round; opacity: 0.55; }
+.gauge .canopy path { fill: var(--turmeric); }
+.gauge .mark line { stroke-width: 2; }
+.gauge .mark text { font: 600 13px 'Public Sans', sans-serif; fill: var(--ink); }
+.gauge .mark text.sub { font-weight: 400; font-size: 11px; fill: var(--mist); }
+.gauge .now line { stroke: var(--ink); }
+.gauge .strike line { stroke: var(--turmeric); stroke-width: 3; }
+.gauge .liq line { stroke: var(--danger); stroke-dasharray: 5 4; }
+.gauge .liq text { fill: var(--danger); }
+
+.facts { display: flex; flex-wrap: wrap; gap: 12px 36px; margin: 0 0 1.75rem; }
+.facts dt { font-size: 0.85rem; color: var(--mist); }
+.facts dd { margin: 0; font-size: 1.15rem; font-weight: 600; }
+.facts .danger { color: var(--danger); }
+
+.field { display: grid; gap: 6px; margin-bottom: 1.25rem; }
+.field > span { font-size: 0.9rem; color: var(--mist); }
+.field input:not([type='range']) {
+  font: 600 1.1rem 'Public Sans', sans-serif;
+  padding: 0.7rem 0.9rem;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  max-width: 280px;
+}
+.field input[type='range'] { accent-color: var(--turmeric); width: 100%; }
+.big { font-size: 1.9rem; font-weight: 700; }
+.big small { font: 400 0.95rem 'Public Sans', sans-serif; color: var(--mist); }
+
+.check { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 0.75rem; max-width: 60ch; }
+.check input { margin-top: 0.3rem; accent-color: var(--ink); width: 18px; height: 18px; }
+.warn { display: block; color: var(--danger); font-style: normal; font-size: 0.9rem; margin: 0 0 1rem; max-width: 60ch; }
+
+.quote { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 1rem 0; margin: 0.5rem 0 1rem; border-top: 1px solid var(--line); }
+.quote span { color: var(--mist); }
+.quote strong { font-size: 1.6rem; }
+.quote small { color: var(--mist); }
+
+/* Underwrite and policies */
+.split { max-width: 520px; }
+.row { display: flex; gap: 10px; margin-bottom: 0.5rem; }
+small { color: var(--mist); }
+
+table { border-collapse: collapse; width: 100%; max-width: 860px; }
+th { text-align: left; font-weight: 600; font-size: 0.85rem; color: var(--mist); padding: 0 12px 8px 0; }
+td { padding: 12px 12px 12px 0; border-top: 1px solid var(--line); }
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.85rem; background: var(--card); border: 1px solid var(--line); }
+.pill.active { border-color: var(--turmeric); }
+.pill.touched { background: var(--turmeric); border-color: var(--turmeric); }
+.pill.paid { background: var(--ink); color: var(--sky); border-color: var(--ink); }
+
+footer { margin-top: 64px; font-size: 0.85rem; color: var(--mist); }
+
+@media (max-width: 760px) {
+  .protect { grid-template-columns: 1fr; gap: 24px; }
+  .gauge-col { max-width: 260px; }
+  .top nav { order: 3; flex-basis: 100%; }
+  table { font-size: 0.9rem; }
+  th:nth-child(3), td:nth-child(3) { display: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .gauge .canopy { transition: transform 0.35s ease; }
+}
