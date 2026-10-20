@@ -5,7 +5,7 @@
 // cron in .github/workflows/keeper.yml runs --for 270 every 5 minutes: near-continuous watch).
 import { createPublicClient, createWalletClient, http, formatUnits } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, GAS } from '../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, waitForReceipt, GAS } from '../shared/mezo.js'
 
 const payung = process.env.PAYUNG ?? ADDR.payung
 const account = privateKeyToAccount(process.env.KEEPER_KEY)
@@ -20,7 +20,7 @@ async function send(functionName, args) {
   const req = { account, address: payung, abi: payungAbi, functionName, args }
   await pub.simulateContract(req) // surface the revert reason instead of burning gas on it
   const hash = await wallet.writeContract({ ...req, gas: GAS })
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 60_000 })
+  const receipt = await waitForReceipt(pub, hash, { timeout: 60_000 })
   console.log(`${functionName}(${args.join(', ')}) -> ${receipt.status} ${mezoTestnet.blockExplorers.default.url}/tx/${hash}`)
 }
 
@@ -28,17 +28,20 @@ let scanFrom = 0n // policies below this index are already paid
 let lastLog = 0
 
 async function tick() {
-  const [price, expiry, observedAt] = await Promise.all([
+  const [price, first, weeks, observedAt] = await Promise.all([
     pub.readContract({ address: ADDR.priceFeed, abi: mezoAbi, functionName: 'fetchPrice' }),
-    read('activeExpiry'),
+    read('currentExpiry'),
+    read('MAX_WEEKS'),
     read('lastObservedAt'),
   ])
   const now = BigInt(Math.floor(Date.now() / 1000))
 
-  if (now < expiry) {
+  // A touch hits every live expiry that sold the strike; each is its own trigger (and reward).
+  for (let w = 0n; w < weeks; w++) {
+    const expiry = first + w * 604800n
     for (const strike of await read('strikeList', [expiry])) {
       const [cover, triggered] = await read('strikes', [expiry, strike])
-      if (!triggered && cover > 0n && price <= strike) await send('trigger', [strike])
+      if (!triggered && cover > 0n && price <= strike) await send('trigger', [expiry, strike])
     }
   }
 

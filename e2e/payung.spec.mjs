@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { parseUnits } from 'viem'
 import { installWallet } from './wallet.mjs'
-import { ADDR, mezoAbi, repayTypedData, repayHints, GAS } from '../shared/mezo.js'
+import { ADDR, mezoAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 
@@ -13,7 +13,7 @@ test.describe('without a wallet', () => {
     await page.goto('./')
     await expect(page.getByRole('heading', { name: /Open an umbrella/ })).toBeVisible()
     await expect(page.getByRole('img', { name: /BTC \$[\d,]+, strike \$[\d,]+/ })).toBeVisible() // price shaft from Mezo's feed
-    await expect(page.getByText(/Premium for the rest of this week/)).toBeVisible()
+    await expect(page.getByText(/Premium for the whole period/)).toBeVisible()
     await expect(page.locator('.quote strong')).toHaveText(/[\d.]+ MUSD/) // quote came from the contract
     await expect(page.getByText(/volatility measured on-chain .*\d+% a year/)).toBeVisible()
 
@@ -63,6 +63,7 @@ test.describe('with a wallet on Mezo testnet', () => {
   test.skip(!KEY, 'set E2E_KEY (a funded Mezo testnet key with a trove and MUSD)')
 
   test('connects, switches network, validates input, buys cover, re-arms auto-repay, underwrites', async ({ page, context }) => {
+    test.setTimeout(600_000)
     const errors = []
     page.on('pageerror', (e) => errors.push(e.message))
     await context.grantPermissions(['notifications'])
@@ -108,18 +109,44 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.locator('.big small')).toHaveText(/(2[89]|30)\.\d% below now/) // ceil(70% of spot) to the $1,000 grid
     for (let i = 0; i < 10; i++) await page.keyboard.press('ArrowRight')
 
-    // Underwrite first: the deposit adds backing capacity for the cover bought next.
+    // Underwrite first: withdraw 20 MUSD of free liquidity (funds the wallet for the run), then
+    // deposit 10 back, which also adds backing capacity for the cover bought next.
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     const amountBox = page.getByLabel('Amount (MUSD)')
-    await amountBox.fill('100')
+    await amountBox.fill('20')
+    await page.getByRole('button', { name: 'Withdraw' }).click()
+    await expect(page.getByRole('status')).toContainText('Withdrew 20 MUSD.', { timeout: 180_000 })
+    await amountBox.fill('10')
     await page.getByRole('button', { name: 'Deposit' }).click()
-    await expect(page.getByRole('status')).toContainText('Deposited 100 MUSD.', { timeout: 180_000 })
+    await expect(page.getByRole('status')).toContainText('Deposited 10 MUSD.', { timeout: 180_000 })
     await page.getByRole('button', { name: 'Protect my loan' }).click()
-    await slider.focus()
-    for (let i = 0; i < 10; i++) await page.keyboard.press('ArrowRight')
-
-    // Buy real cover with auto-repay, sized to what the vault can still back this week.
     await cover.fill('25')
+    // A strike under the liquidation line: the app warns that Mezo would refuse the repay.
+    await slider.focus()
+    await page.keyboard.press('Home')
+    await expect(page.getByText(/Mezo would refuse the repay/)).toBeVisible()
+    // ~8-9% below spot, above this loan's liquidation line: the warning clears.
+    await page.keyboard.press('End')
+    for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowLeft')
+    await expect(page.getByText(/Mezo would refuse the repay/)).toBeHidden()
+
+    // Cover period: a longer term moves the expiry and costs more (more time for a touch).
+    await cover.fill('25')
+    // Compare the rate (% of cover): it doesn't depend on which cover amount the last quote used.
+    const rateOf = async () => Number(((await page.locator('.quote small').textContent()) ?? '').replace(/[^0-9.]/g, ''))
+    // Quotes arrive async after every strike/amount change: wait until the shown rate stops moving.
+    const settled = async () => {
+      const a = await rateOf()
+      await page.waitForTimeout(2000)
+      return a > 0 && a === (await rateOf()) ? a : -1
+    }
+    await expect.poll(settled, { timeout: 60_000 }).toBeGreaterThan(0)
+    const oneWeek = await rateOf()
+    await page.getByText('3 weeks').click()
+    await expect.poll(rateOf).toBeGreaterThan(oneWeek)
+    await page.getByText('2 weeks').click()
+
+    // Buy real 2-week cover with auto-repay, sized to what the vault can still back.
     await expect(page.getByRole('checkbox')).toBeChecked()
     await expect(buy).toBeEnabled()
     await buy.click()
@@ -141,13 +168,13 @@ test.describe('with a wallet on Mezo testnet', () => {
     const sig = await w.account.signTypedData(repayTypedData({ amount, borrower: w.account.address, nonce, deadline }))
     const [upper, lower] = await repayHints(w.pub, w.account.address, amount)
     const hash = await w.wallet.writeContract({ address: ADDR.sigs, abi: mezoAbi, functionName: 'repayMUSDWithSignature', args: [amount, upper, lower, w.account.address, sig, deadline], gas: GAS })
-    expect((await w.pub.waitForTransactionReceipt({ hash })).status).toBe('success')
+    expect((await waitForReceipt(w.pub, hash)).status).toBe('success')
     await page.reload()
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await page.getByRole('button', { name: 'My cover' }).click()
     await expect(row).toContainText('repay signature no longer valid')
     await row.getByRole('button', { name: 'Re-sign' }).click()
-    await expect(page.getByRole('status')).toContainText('Auto-repay re-signed', { timeout: 120_000 })
+    await expect(page.getByRole('status')).toContainText('Auto-repay re-signed', { timeout: 240_000 })
     await expect(row).toContainText('Loan, repay checked')
 
     // Underwrite: withdraw 10 MUSD of free liquidity.

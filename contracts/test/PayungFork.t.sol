@@ -100,14 +100,14 @@ contract PayungForkTest is Test {
 
         vm.startPrank(borrower);
         IERC20(MUSD).approve(address(vault), type(uint256).max);
-        uint256 id = vault.buy(strike, cover, type(uint256).max, true, deadline, sig);
+        uint256 id = vault.buy(vault.currentExpiry(), strike, cover, type(uint256).max, true, deadline, sig);
         vm.stopPrank();
 
         (, uint256 principalBefore, uint256 interestBefore,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
 
         // BTC touches the strike: the whole MUSD system sees the lower price.
         _setPrice(strike - 1e18);
-        vault.trigger(strike);
+        vault.trigger(vault.currentExpiry(), strike);
         uint256 walletBefore = IERC20(MUSD).balanceOf(borrower);
         vault.claim(id, address(0), address(0));
 
@@ -131,13 +131,13 @@ contract PayungForkTest is Test {
         uint256 nonce = ISigs(SIGS).getNonce(borrower);
         vm.startPrank(borrower);
         IERC20(MUSD).approve(address(vault), type(uint256).max);
-        uint256 id = vault.buy(strike, 1_000e18, type(uint256).max, true, deadline, _signRepay(1_000e18, deadline, nonce + 1));
+        uint256 id = vault.buy(vault.currentExpiry(), strike, 1_000e18, type(uint256).max, true, deadline, _signRepay(1_000e18, deadline, nonce + 1));
         vault.setAutoRepay(id, true, deadline, _signRepay(1_000e18, deadline, nonce));
         vm.stopPrank();
 
         (, uint256 principalBefore,,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
         _setPrice(strike);
-        vault.trigger(strike);
+        vault.trigger(vault.currentExpiry(), strike);
         vault.claim(id, address(0), address(0));
         (, uint256 principalAfter,,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
         assertApproxEqAbs(principalBefore - principalAfter, 1_000e18, 1e15);

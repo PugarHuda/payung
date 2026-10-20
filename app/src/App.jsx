@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, decodeEventLog, parseEventLogs } from 'viem'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, EXPLORER_API, GAS } from '../../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, EXPLORER_API, GAS } from '../../shared/mezo.js'
 import './App.css'
 
 // ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
@@ -13,6 +13,8 @@ const MIN_COVER = 10n * WAD
 const MCR = 110n // liquidation at 110% collateral ratio
 const CCR = 150n // in recovery mode (system ratio under 150%) loans under 150% can be liquidated
 const TARGET_CR = 150n // cover sized to lift the trove back to 150% at the strike
+const WEEK = 604800n
+const MAX_WEEKS = 4 // the contract sells cover to this week's expiry or up to 3 weeks after
 const SLIPPAGE = 101n // accept a premium up to 1% above the quote
 const ALERT_BAND = 103n // notify when BTC is within 3% of an active strike
 const EXPLORER = mezoTestnet.blockExplorers.default.url
@@ -48,7 +50,7 @@ const txLink = (hash) => <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel=
 const REVERTS = {
   'Payung: premium moved': 'The premium rose while you were confirming (BTC moved). Check the new quote and try again.',
   'Payung: vault capacity': 'The vault cannot back that much cover right now. Lower the cover amount.',
-  'Payung: sales closed': 'Sales for this week closed an hour before expiry. Cover for next week opens at Thursday 00:00 UTC.',
+  'Payung: sales closed': 'Cover ending this week stops selling an hour before expiry. Pick a longer cover period.',
   'Payung: strike out of range': 'BTC moved and the strike is no longer 5–30% below the price. Pick the strike again.',
   'PriceFeed: Oracle is stale.': 'The Mezo price feed is stale right now. Try again in a minute.',
 }
@@ -139,25 +141,26 @@ export default function App() {
 
   const load = async () => {
     const price = await readM(ADDR.priceFeed, 'fetchPrice').catch(() => null)
-    const [nav, free, capacity, activeCover, activeExpiry, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt] = await Promise.all([
-      readP('totalAssets'), readP('freeLiquidity'), readP('coverCapacity'), readP('activeCover'), readP('activeExpiry'),
+    const [nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt] = await Promise.all([
+      readP('totalAssets'), readP('freeLiquidity'), readP('coverCapacity'), readP('totalLocked'),
       readP('currentExpiry'), readP('totalSupply'), readP('volatility'), readP('maxUtilization'),
       readM(ADDR.musd, 'balanceOf', [PAYUNG]), readP('totalOwed'),
       price ? readM(ADDR.troveManager, 'checkRecoveryMode', [price]) : null,
       price ? readM(ADDR.troveManager, 'getTCR', [price]) : null,
       readP('lastObservedAt'),
     ])
-    const live = nowSec() < activeExpiry
-    // Strikes BTC is at or under that nobody has triggered yet: anyone can trigger and earn the reward.
+    // Strikes BTC is at or under that nobody has triggered yet, in every live expiry:
+    // anyone can trigger them and earn the reward.
     const touchable = []
-    if (live && price) {
-      for (const strike of await readP('strikeList', [activeExpiry])) {
+    for (let w = 0n; price && w < BigInt(MAX_WEEKS); w++) {
+      const e = expiry + w * WEEK
+      for (const strike of await readP('strikeList', [e])) {
         if (price > strike) continue
-        const [cover, triggered] = await readP('strikes', [activeExpiry, strike])
-        if (!triggered) touchable.push({ strike, cover, reward: await readP('triggerReward', [cover]) })
+        const [cover, triggered] = await readP('strikes', [e, strike])
+        if (!triggered) touchable.push({ expiry: e, strike, cover, reward: await readP('triggerReward', [cover]) })
       }
     }
-    setChain({ price, nav, free, capacity, activeCover: live ? activeCover : 0n, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, touchable })
+    setChain({ price, nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, touchable })
     if (!account) return
     const [debtColl, status, bal, code, shares, ids] = await Promise.all([
       readM(ADDR.troveManager, 'getEntireDebtAndColl', [account]),
@@ -262,7 +265,8 @@ export default function App() {
     const req = { account, address, abi, functionName, args }
     await pub.simulateContract(req) // a revert reason now beats a failed transaction later
     const hash = await wallet.writeContract({ ...req, gas: GAS })
-    const r = await pub.waitForTransactionReceipt({ hash, timeout: 180_000 }).catch(() => {
+    setNotice({ kind: 'info', text: 'Sent. Waiting for Mezo to confirm…', hash })
+    const r = await waitForReceipt(pub, hash).catch(() => {
       throw new Error(`Sent, but Mezo has not confirmed it after 3 minutes. Check ${EXPLORER}/tx/${hash}`)
     })
     if (r.status !== 'success') throw new Error(`Transaction failed: ${EXPLORER}/tx/${hash}`)
@@ -328,7 +332,9 @@ export default function App() {
 }
 
 function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite }) {
-  const { price, expiry, capacity, vol, tcr } = chain
+  const { price, capacity, vol, tcr } = chain
+  const [weeks, setWeeks] = useState(1)
+  const expiry = chain.expiry ? chain.expiry + BigInt(weeks - 1) * WEEK : undefined
   const { liq, viaRecovery, recoveryAt } = me.hasTrove ? liquidationPrice(me, price, tcr) : {}
   const minStrike = price ? roundUp((price * 70n) / 100n, STEP) : null
   const maxStrike = price ? ((price * 95n) / 100n / STEP) * STEP : null
@@ -358,12 +364,17 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
 
   useEffect(() => {
     if (!strike || !coverWei || coverWei < MIN_COVER || PAYUNG === ZERO) return setQuote()
-    readP('quote', [strike, coverWei]).then(([premium, distance]) => setQuote({ premium, distance })).catch(() => setQuote())
-  }, [strike, coverWei, readP, price])
+    if (!expiry) return
+    readP('quote', [expiry, strike, coverWei]).then(([premium, distance]) => setQuote({ premium, distance })).catch(() => setQuote())
+  }, [expiry, strike, coverWei, readP, price])
 
   const tooBig = capacity != null && coverWei > capacity
   const cantPay = !!quote && me.bal != null && me.bal < quote.premium
   const leavesTooLittle = me.hasTrove && autoRepay && !!coverWei && me.debt - coverWei < 2000n * WAD
+  // Mezo only accepts a repay that leaves the loan at or above 110% at that price; below it the
+  // payout falls back to the wallet (and the loan may already be liquidated).
+  const afterRatio = me.hasTrove && strike && coverWei > 0n && me.debt > coverWei ? (me.coll * strike * 100n) / (me.debt - coverWei) / WAD : null
+  const repayTooLate = autoRepay && afterRatio != null && afterRatio < MCR
 
   async function buy() {
     await run('buy', async () => {
@@ -371,7 +382,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
       const sig = autoRepay ? await signRepay(coverWei, deadline) : '0x'
       const maxPremium = (quote.premium * SLIPPAGE) / 100n
       await ensureAllowance(maxPremium)
-      const hash = await write(PAYUNG, payungAbi, 'buy', [strike, coverWei, maxPremium, autoRepay, deadline, sig])
+      const hash = await write(PAYUNG, payungAbi, 'buy', [expiry, strike, coverWei, maxPremium, autoRepay, deadline, sig])
       return { hash, text: `Covered. If BTC touches ${usd(strike)} before ${date(expiry)}, ${musd(coverWei, 0)} ${autoRepay ? 'goes straight into your loan' : 'goes to your wallet'}.` }
     })
   }
@@ -385,7 +396,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
       <section className="form-col">
         <h1>Open an umbrella over your MUSD loan.</h1>
         <p className="lede">
-          Pay a small premium for this week. If BTC falls to your strike before {expiry ? date(expiry) : 'Thursday 00:00 UTC'}, Payung pays MUSD into your loan, before the liquidation line is reached.
+          Pay a small premium for one to four weeks. If BTC falls to your strike before the cover ends, Payung pays MUSD into your loan, before the liquidation line is reached.
         </p>
 
         {account && (
@@ -419,12 +430,24 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <strong className="big">{usd(strike)}{quote && <small> · {(Number(quote.distance) / 100).toFixed(1)}% below now</small>}</strong>
         </label>
 
+        <fieldset className="field weeks">
+          <legend>Cover period: until {expiry ? date(expiry) : '…'}</legend>
+          <div className="seg">
+            {Array.from({ length: MAX_WEEKS }, (_, i) => i + 1).map((n) => (
+              <label key={n} className={weeks === n ? 'on' : ''}>
+                <input type="radio" name="weeks" value={n} checked={weeks === n} onChange={() => setWeeks(n)} />
+                {n === 1 ? 'This week' : `${n} weeks`}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
         <label className="field">
           <span>Cover amount (MUSD)</span>
           <input inputMode="decimal" value={cover} aria-invalid={!!coverError || tooBig} onChange={(e) => setCover(e.target.value.replace(/[^0-9.]/g, ''))} />
           {coverError && <em className="warn">{coverError}</em>}
           {tooBig && (capacity < MIN_COVER
-            ? <em className="warn">This week's cover is fully booked. Capacity grows when underwriters deposit, and resets at {date(expiry)}.</em>
+            ? <em className="warn">The vault's cover is fully booked. Capacity grows when underwriters deposit or when cover expires (next on {date(chain.expiry)}).</em>
             : <em className="warn">The vault can back {musd(capacity, 0)} more this week. Lower the cover.</em>)}
         </label>
 
@@ -439,19 +462,25 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <span>Repay my loan automatically when it pays out (you sign Mezo's repay message once)</span>
         </label>
         {me.smartAccount && <em className="warn">This is a smart-contract account. Mezo only accepts repay signatures from regular wallets, so the payout goes to your wallet.</em>}
+        {repayTooLate && (
+          <em className="warn">
+            At {usd(strike)} even after the payout your loan would sit under 110%, so Mezo would refuse the repay and the payout would go to your wallet.
+            Raise the strike above {usd(liq)} or the cover amount.
+          </em>
+        )}
         {leavesTooLittle && <em className="warn">Mezo loans keep at least 1,800 MUSD of debt. If the repay would go below that, the payout is sent to your wallet instead.</em>}
 
         <div className="quote">
-          <span>Premium for the rest of this week</span>
+          <span>Premium for the whole period</span>
           <strong>{quote ? musd(quote.premium) : '—'}</strong>
           {quote && coverWei > 0n && <small>{((Number(quote.premium) / Number(coverWei)) * 100).toFixed(2)}% of cover</small>}
         </div>
         <p className="fine">
-          Priced from BTC volatility measured on-chain from Mezo's price feed ({pct(vol, 0)} a year) and the {expiry ? left(expiry) : '…'} left this week, so cover gets cheaper as the week runs out.
+          Priced from BTC volatility measured on-chain from Mezo's price feed ({pct(vol, 0)} a year) and the {expiry ? left(expiry) : '…'} the cover runs: the longer it runs, the likelier a touch.
           You pay at most 1% more than this quote.
         </p>
         {cantPay && <em className="warn">You have {musd(me.bal)}. Borrow or buy MUSD on Mezo to pay the premium.</em>}
-        {expiry && !salesOpen && <em className="warn">Sales close an hour before expiry. Cover for next week opens at {date(expiry)}.</em>}
+        {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
         {account ? (
           <button className="primary wide" disabled={!canWrite || !quote || tooBig || cantPay || !salesOpen || !!coverError || !!busy} onClick={buy}>
@@ -473,8 +502,8 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
   const wei = parseAmount(amount)
   const sharePrice = chain.supply ? (Number(chain.nav) / Number(chain.supply)) * 1e6 : 1 // 6-decimal virtual offset
   const backing = chain.balance != null ? chain.balance - chain.owed : null
-  const utilization = backing ? (chain.activeCover * WAD) / backing : 0n
-  const weekPremiums = activity?.filter((a) => a.eventName === 'PolicyBought' && a.args.expiry === chain.expiry).reduce((s, a) => s + a.args.premium, 0n)
+  const utilization = backing ? (chain.locked * WAD) / backing : 0n
+  const weekPremiums = activity?.filter((a) => a.eventName === 'PolicyBought' && a.args.expiry > nowSec()).reduce((s, a) => s + a.args.premium, 0n)
 
   useEffect(() => {
     // ponytail: first page of the explorer's log index (50 events); paginate when the vault is busier.
@@ -504,13 +533,13 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
       <h1>Earn MUSD by backing Bitcoin borrowers.</h1>
       <p className="lede">
         Your MUSD backs weekly cover. Borrowers pay premiums into the vault every week. If BTC touches a strike, the vault pays that cover.
-        Every policy is fully backed, and open cover is capped at {chain.maxUtil != null ? Number(chain.maxUtil) / 100 : '…'}% of the vault, so that is the most it can lose in one week.
+        Every policy is fully backed, and open cover across all weeks is capped at {chain.maxUtil != null ? Number(chain.maxUtil) / 100 : '…'}% of the vault, so that is the most it can lose.
         Whoever triggers a touched strike earns 0.1% of its cover (up to 10 MUSD), so anyone can help watch the price.
       </p>
       <dl className="facts">
         <div><dt>Vault value</dt><dd>{musd(chain.nav, 0)}</dd></div>
-        <div><dt>Backing open cover</dt><dd>{musd(chain.activeCover, 0)} <small>({pct(utilization, 0)})</small></dd></div>
-        <div><dt>Premiums this week</dt><dd>{weekPremiums != null ? musd(weekPremiums) : '…'}</dd></div>
+        <div><dt>Backing open cover</dt><dd>{musd(chain.locked, 0)} <small>({pct(utilization, 0)})</small></dd></div>
+        <div><dt>Premiums on open cover</dt><dd>{weekPremiums != null ? musd(weekPremiums) : '…'}</dd></div>
         <div><dt>Free to withdraw</dt><dd>{musd(chain.free, 0)}</dd></div>
         <div><dt>1 pyMUSD</dt><dd>{sharePrice.toFixed(4)} MUSD</dd></div>
         <div><dt>BTC volatility (on-chain)</dt><dd>{pct(chain.vol, 0)}</dd></div>
@@ -520,10 +549,10 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
       {chain.touchable?.length > 0 && (
         <div className="banner ok">
           {chain.touchable.map((t) => (
-            <p key={t.strike}>
-              BTC touched the {usd(t.strike)} strike ({musd(t.cover, 0)} of cover) and nobody has triggered it yet.{' '}
+            <p key={`${t.expiry}-${t.strike}`}>
+              BTC touched the {usd(t.strike)} strike ({musd(t.cover, 0)} of cover ending {date(t.expiry)}) and nobody has triggered it yet.{' '}
               <button className="small" disabled={!canWrite || !!busy} onClick={() => run('trigger', async () => {
-                const hash = await write(PAYUNG, payungAbi, 'trigger', [t.strike])
+                const hash = await write(PAYUNG, payungAbi, 'trigger', [t.expiry, t.strike])
                 return { hash, text: `Triggered ${usd(t.strike)}. You earned ${musd(t.reward)}; the cover is now owed to its holders.` }
               })}>{account ? `Trigger it and earn ${musd(t.reward)}` : 'Connect a wallet to trigger it'}</button>
             </p>
@@ -552,7 +581,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
             })}>{busy === 'withdraw' ? 'Withdrawing…' : 'Withdraw'}</button>
             {me.maxWithdraw > 0n && <button className="tab" onClick={() => setAmount(formatUnits(me.maxWithdraw, 18))}>Max</button>}
           </div>
-          <small>You can withdraw up to {musd(me.maxWithdraw)} now. MUSD backing open cover unlocks at the weekly expiry.</small>
+          <small>You can withdraw up to {musd(me.maxWithdraw)} now. MUSD backing open cover unlocks as each week's cover expires.</small>
         </div>
       ) : (
         <button className="primary" onClick={connect}>Connect wallet to deposit</button>

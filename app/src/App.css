@@ -159,3 +159,12 @@ button.small { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
 .activity li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 0.95rem; }
 .activity li a { color: var(--mist); white-space: nowrap; font-size: 0.85rem; }
 .facts dd small { font-weight: 400; }
+
+/* Cover period: one segmented row of radio buttons */
+fieldset.field { border: 0; padding: 0; margin: 0 0 1.25rem; min-width: 0; }
+fieldset.field legend { font-size: 0.9rem; color: var(--mist); padding: 0; margin-bottom: 6px; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg label { border: 1.5px solid var(--line); border-radius: 999px; padding: 0.45rem 0.9rem; cursor: pointer; font-weight: 600; font-size: 0.92rem; background: var(--card); }
+.seg label.on { border-color: var(--ink); background: var(--ink); color: var(--sky); }
+.seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.seg label:has(input:focus-visible) { outline: 3px solid var(--turmeric); outline-offset: 2px; }

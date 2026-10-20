@@ -12,7 +12,7 @@ export const mezoTestnet = defineChain({
 })
 
 export const ADDR = {
-  payung: '0x7F9f315304450d5E78475223374545B8B9b873A0',
+  payung: '0xdC66559C75c9950f8869e20A04C14494DF601d4d',
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
   troveManager: '0xE47c80e8c23f6B4A1aE41c34837a0599D5D16bb0',
@@ -91,6 +91,17 @@ export async function autoRepayProblem(client, vault, policy) {
   } catch (e) {
     return e.walk?.((x) => x.reason)?.reason ?? e.shortMessage ?? e.message
   }
+}
+
+/// Polls eth_getTransactionReceipt directly. viem's waitForTransactionReceipt (block-number watch
+/// + confirmation count) intermittently never resolved against Mezo's RPC for transactions that
+/// were mined in seconds; a plain receipt poll sees them every time.
+export async function waitForReceipt(client, hash, { timeout = 180_000, interval = 1_500 } = {}) {
+  for (const end = Date.now() + timeout; Date.now() < end; await new Promise((r) => setTimeout(r, interval))) {
+    const receipt = await client.getTransactionReceipt({ hash }).catch(() => null)
+    if (receipt) return receipt
+  }
+  throw new Error(`Mezo has not confirmed ${hash} after ${timeout / 1000} s`)
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

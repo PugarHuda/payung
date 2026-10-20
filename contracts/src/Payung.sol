@@ -29,9 +29,9 @@ interface IBorrowerOperationsSignatures {
 }
 
 /// @title Payung — liquidation cover for Mezo MUSD borrowers
-/// @notice Underwriters deposit MUSD into this ERC-4626 vault. Borrowers buy weekly
-/// one-touch cover: if the Mezo BTC price touches the strike before expiry
-/// (Thursday 00:00 UTC, the Mezo Earn epoch boundary), the cover pays a fixed MUSD
+/// @notice Underwriters deposit MUSD into this ERC-4626 vault. Borrowers buy one-touch cover
+/// for one to four weeks: if the Mezo BTC price touches the strike before expiry (a Thursday
+/// 00:00 UTC, the Mezo Earn epoch boundary), the cover pays a fixed MUSD
 /// amount, either straight into the borrower's trove (pre-signed repay) or to their wallet.
 /// Every policy is fully collateralised, and open cover never exceeds `maxUtilization` of the vault.
 /// Premiums scale with time left in the epoch and with BTC volatility measured on-chain from
@@ -44,7 +44,8 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant STRIKE_STEP = 1000e18; // strikes on a $1,000 grid
     uint256 public constant MIN_DISTANCE_BPS = 500; // strike at least 5% below spot
     uint256 public constant MAX_DISTANCE_BPS = 3000; // and at most 30% below
-    uint256 public constant MAX_STRIKES = 64; // per epoch: more than the 5-30% band can reach, bounds the NAV loop
+    uint256 public constant MAX_WEEKS = 4; // cover can run to this week's expiry or up to 3 weeks after
+    uint256 public constant MAX_STRIKES = 32; // per expiry: covers the 5-30% band at today's prices, bounds the NAV loop
     uint256 public constant MIN_COVER = 10e18;
     uint256 public constant BPS = 10_000;
     uint256 public constant TABLE_SIZE = 26; // one entry per 1% from 5% to 30%
@@ -90,8 +91,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     mapping(uint256 => mapping(uint256 => Strike)) public strikes; // expiry => strike => state
     mapping(uint256 => uint256[]) internal _strikeList; // expiry => strikes sold
 
-    uint256 public activeExpiry;
-    uint256 public activeCover; // untriggered cover of the active epoch (locked collateral)
+    mapping(uint256 => uint256) public lockedCover; // expiry => untriggered cover (collateral locked until then)
     uint256 public totalOwed; // triggered cover not yet paid out
     uint256 public maxUtilization = 5000; // bps of (vault MUSD - owed) that open cover may lock
 
@@ -128,7 +128,8 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
 
     // ------------------------------------------------------------------ cover
 
-    /// @notice Buy one-touch cover for the current epoch.
+    /// @notice Buy one-touch cover that runs until `expiry`.
+    /// @param expiry A weekly expiry (Thursday 00:00 UTC): `currentExpiry()` or up to 3 weeks after it.
     /// @param strike BTC price (18 decimals) that triggers the payout; multiple of STRIKE_STEP.
     /// @param cover MUSD paid out if the price touches `strike` before expiry.
     /// @param maxPremium Reverts if the premium at execution exceeds this (price or vol moved).
@@ -136,6 +137,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// RepayMUSD(cover, buyer, nonce, sigDeadline) signature for Mezo's BorrowerOperationsSignatures.
     /// Falls back to a wallet transfer if the repay is no longer valid.
     function buy(
+        uint256 expiry,
         uint256 strike,
         uint256 cover,
         uint256 maxPremium,
@@ -148,7 +150,8 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         whenNotPaused
         returns (uint256 id)
     {
-        uint256 expiry = currentExpiry();
+        uint256 first = currentExpiry();
+        require(expiry % EPOCH == 0 && expiry >= first && expiry < first + MAX_WEEKS * EPOCH, "Payung: bad expiry");
         require(block.timestamp + SALE_CUTOFF < expiry, "Payung: sales closed");
         require(strike > 0 && strike % STRIKE_STEP == 0, "Payung: bad strike");
         require(cover >= MIN_COVER, "Payung: cover too small");
@@ -159,12 +162,6 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         uint256 distance = (price - strike) * BPS / price;
         require(distance >= MIN_DISTANCE_BPS && distance <= MAX_DISTANCE_BPS, "Payung: strike out of range");
         _observe(price);
-
-        if (activeExpiry != expiry) {
-            // Previous epoch is over (sales stop before expiry), so its untriggered cover is void.
-            activeExpiry = expiry;
-            activeCover = 0;
-        }
 
         Strike storage s = strikes[expiry][strike];
         require(!s.triggered, "Payung: strike already touched");
@@ -180,7 +177,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         require(cover <= coverCapacity(), "Payung: vault capacity");
 
         s.cover += cover;
-        activeCover += cover;
+        lockedCover[expiry] += cover;
 
         id = _policies.length;
         _policies.push(
@@ -199,10 +196,9 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         emit PolicyBought(id, msg.sender, expiry, strike, cover, premium, autoRepay);
     }
 
-    /// @notice Permissionless: mark `strike` as touched once the Mezo price is at or below it.
+    /// @notice Permissionless: mark `strike` of `expiry` as touched once the Mezo price is at or below it.
     /// The caller earns 0.1% of the touched cover (max 10 MUSD) from the vault's free MUSD.
-    function trigger(uint256 strike) external nonReentrant returns (uint256 reward) {
-        uint256 expiry = activeExpiry;
+    function trigger(uint256 expiry, uint256 strike) external nonReentrant returns (uint256 reward) {
         require(block.timestamp < expiry, "Payung: epoch over");
         Strike storage s = strikes[expiry][strike];
         require(s.cover > 0 && !s.triggered, "Payung: nothing to trigger");
@@ -211,7 +207,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         _observe(price);
 
         s.triggered = true;
-        activeCover -= s.cover;
+        lockedCover[expiry] -= s.cover;
         totalOwed += s.cover;
 
         reward = Math.min(triggerReward(s.cover), freeLiquidity());
@@ -289,14 +285,14 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @notice Premium per unit of cover (bps) for `strike` with `remaining` seconds to expiry.
     /// A one-touch probability depends on distance / (vol * sqrt(time)), so the distance is
-    /// rescaled onto the one-week, 50%-vol table: cover gets cheaper as the week runs out,
-    /// and the NAV mark decays smoothly instead of jumping at expiry.
+    /// rescaled onto the one-week, 50%-vol table: cover gets cheaper as the week runs out, dearer
+    /// for multi-week terms, and the NAV mark decays smoothly instead of jumping at expiry.
     function premiumRate(uint256 price, uint256 strike, uint256 remaining) public view returns (uint256) {
         if (price <= strike) return BPS;
         // slither-disable-next-line incorrect-equality (expiry reached: nothing left to insure)
         if (remaining == 0) return 0;
         uint256 distance = (price - strike) * BPS / price;
-        uint256 timeScale = Math.sqrt(EPOCH * 1e36 / Math.min(remaining, EPOCH)); // sqrt(week / remaining), wad
+        uint256 timeScale = Math.sqrt(EPOCH * 1e36 / remaining); // sqrt(week / remaining), wad
         return touchProbability(Math.mulDiv(distance, VOL_REF * timeScale, volatility() * 1e18));
     }
 
@@ -315,12 +311,17 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         return a - (a - b) * frac / 100; // table is non-increasing
     }
 
-    /// @notice Premium for `cover` at `strike`, at the current Mezo price, vol and time to expiry.
-    function quote(uint256 strike, uint256 cover) external view returns (uint256 premium, uint256 distanceBps) {
+    /// @notice Premium for `cover` at `strike` until `expiry`, at the current Mezo price and vol.
+    function quote(uint256 expiry, uint256 strike, uint256 cover)
+        external
+        view
+        returns (uint256 premium, uint256 distanceBps)
+    {
         uint256 price = priceFeed.fetchPrice();
         require(strike < price, "Payung: strike above spot");
+        require(expiry > block.timestamp, "Payung: epoch over");
         distanceBps = (price - strike) * BPS / price;
-        uint256 remaining = currentExpiry() - block.timestamp;
+        uint256 remaining = expiry - block.timestamp;
         premium = Math.mulDiv(cover, premiumRate(price, strike, remaining), BPS, Math.Rounding.Ceil);
     }
 
@@ -333,7 +334,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         emit PremiumTableUpdated(table);
     }
 
-    /// @notice Caps open cover at `bps` of the vault, bounding what underwriters can lose in one week.
+    /// @notice Caps open cover (all expiries) at `bps` of the vault, bounding what underwriters can lose.
     function setMaxUtilization(uint256 bps) external onlyOwner {
         require(bps > 0 && bps <= BPS, "Payung: bad utilization");
         maxUtilization = bps;
@@ -363,22 +364,34 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Marked value of untriggered cover. If the oracle is stale, every open
     /// policy is marked at full cover (conservative for those staying in the vault).
     function openLiability() public view returns (uint256 liability) {
-        if (block.timestamp >= activeExpiry) return 0;
         // slither-disable-next-line uninitialized-local (set in the try branch)
         uint256 price;
         try priceFeed.fetchPrice() returns (uint256 p) {
             price = p;
         } catch {
-            return activeCover;
+            return totalLocked();
         }
-        uint256 remaining = activeExpiry - block.timestamp;
-        uint256[] storage list = _strikeList[activeExpiry];
-        for (uint256 i; i < list.length; ++i) {
-            Strike storage s = strikes[activeExpiry][list[i]];
-            if (s.triggered) continue;
-            liability += price <= list[i]
-                ? s.cover + triggerReward(s.cover) // touched, the trigger (and its reward) is a call away
-                : Math.mulDiv(s.cover, premiumRate(price, list[i], remaining), BPS, Math.Rounding.Ceil);
+        uint256 first = currentExpiry();
+        for (uint256 w; w < MAX_WEEKS; ++w) {
+            uint256 expiry = first + w * EPOCH;
+            uint256 remaining = expiry - block.timestamp;
+            uint256[] storage list = _strikeList[expiry];
+            for (uint256 i; i < list.length; ++i) {
+                Strike storage s = strikes[expiry][list[i]];
+                if (s.triggered) continue;
+                liability += price <= list[i]
+                    ? s.cover + triggerReward(s.cover) // touched, the trigger (and its reward) is a call away
+                    : Math.mulDiv(s.cover, premiumRate(price, list[i], remaining), BPS, Math.Rounding.Ceil);
+            }
+        }
+    }
+
+    /// @notice Untriggered cover of every live expiry: the collateral locked right now.
+    /// Expired weeks drop out by themselves, so nothing needs to roll them over.
+    function totalLocked() public view returns (uint256 locked) {
+        uint256 first = currentExpiry();
+        for (uint256 w; w < MAX_WEEKS; ++w) {
+            locked += lockedCover[first + w * EPOCH];
         }
     }
 
@@ -389,16 +402,16 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice MUSD not reserved for payouts or open cover; the only part that can leave or back new cover.
     function freeLiquidity() public view returns (uint256) {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
-        uint256 reserved = totalOwed + (block.timestamp < activeExpiry ? activeCover : 0);
+        uint256 reserved = totalOwed + totalLocked();
         return balance > reserved ? balance - reserved : 0;
     }
 
-    /// @notice Cover that can still be sold this epoch under `maxUtilization`.
+    /// @notice Cover that can still be sold (any expiry) under `maxUtilization`.
     function coverCapacity() public view returns (uint256) {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
         if (balance <= totalOwed) return 0;
         uint256 cap = (balance - totalOwed) * maxUtilization / BPS;
-        uint256 used = block.timestamp < activeExpiry ? activeCover : 0;
+        uint256 used = totalLocked();
         return cap > used ? cap - used : 0;
     }
 

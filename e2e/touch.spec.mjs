@@ -68,9 +68,13 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     const me = w.account.address
     // Fork-only gas money: anvil suggests a 1 gwei tip where Mezo charges ~150 wei.
     await fork.request({ method: 'anvil_setBalance', params: [me, numberToHex(10n ** 18n)] })
-    const policies = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [me] })
-    const id = policies.at(-1)
-    const policy = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policy', args: [id] })
+    // The holder's live auto-repay policy with the highest strike: a touch there leaves the loan
+    // above 110% after the payout, so Mezo accepts the repay (the app warns when it wouldn't).
+    const ids = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [me] })
+    const all = await Promise.all(ids.map(async (id) => ({ id, ...(await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policy', args: [id] })) })))
+    const now = BigInt(Math.floor(Date.now() / 1000))
+    const policy = all.filter((p) => p.autoRepay && !p.claimed && p.expiry > now).sort((a, b) => (b.strike > a.strike ? 1 : b.strike < a.strike ? -1 : Number(b.id - a.id)))[0]
+    const ends = new Date(Number(policy.expiry) * 1000).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC'
     const strikeUsd = Number(policy.strike / 10n ** 18n)
 
     await setPrice(String(strikeUsd - 500)) // BTC dips $500 under the strike
@@ -82,7 +86,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     // Make sure the payout can land in the loan: if an earlier signed Mezo action used up the
     // nonce this policy was signed with, the app shows Re-sign; use it.
     await page.getByRole('button', { name: 'My cover' }).click()
-    const row = page.locator('tbody tr').first()
+    const row = page.locator('tbody tr', { hasText: ends }).filter({ hasText: `$${strikeUsd.toLocaleString('en-US')}` }).filter({ hasText: `${policy.cover / 10n ** 18n} MUSD` }).first()
     await expect(row).not.toContainText('checking the repay', { timeout: 300_000 })
     if (await row.getByRole('button', { name: 'Re-sign' }).isVisible()) {
       await row.getByRole('button', { name: 'Re-sign' }).click()
@@ -92,7 +96,10 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     // Underwrite tab offers the trigger to anyone, with its reward.
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     // Every strike BTC is under gets its own trigger offer; take the one this policy sits on.
-    const trigger = page.locator('.banner p', { hasText: `the $${strikeUsd.toLocaleString('en-US')} strike` }).getByRole('button', { name: /Trigger it and earn/ })
+    const trigger = page
+      .locator('.banner p', { hasText: `the $${strikeUsd.toLocaleString('en-US')} strike` })
+      .filter({ hasText: `ending ${ends}` })
+      .getByRole('button', { name: /Trigger it and earn/ })
     await expect(trigger).toBeVisible()
     const [strikeCover] = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'strikes', args: [policy.expiry, policy.strike] })
     const expected = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'triggerReward', args: [strikeCover] })

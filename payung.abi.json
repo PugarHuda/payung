@@ -92,6 +92,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_WEEKS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_COVER",
     "inputs": [],
     "outputs": [
@@ -268,32 +281,6 @@
   },
   {
     "type": "function",
-    "name": "activeCover",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "activeExpiry",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "allowance",
     "inputs": [
       {
@@ -389,6 +376,11 @@
     "type": "function",
     "name": "buy",
     "inputs": [
+      {
+        "name": "expiry",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
       {
         "name": "strike",
         "type": "uint256",
@@ -588,6 +580,25 @@
         "name": "",
         "type": "uint128",
         "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lockedCover",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1019,6 +1030,11 @@
     "name": "quote",
     "inputs": [
       {
+        "name": "expiry",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "strike",
         "type": "uint256",
         "internalType": "uint256"
@@ -1209,6 +1225,19 @@
   },
   {
     "type": "function",
+    "name": "totalLocked",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "locked",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "totalOwed",
     "inputs": [],
     "outputs": [
@@ -1322,6 +1351,11 @@
     "type": "function",
     "name": "trigger",
     "inputs": [
+      {
+        "name": "expiry",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
       {
         "name": "strike",
         "type": "uint256",
