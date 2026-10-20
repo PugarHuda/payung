@@ -5,3 +5,5 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/*/31611/run-*.json
 dist/
+test-results/
+playwright-report/

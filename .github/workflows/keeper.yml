@@ -1,0 +1,27 @@
+name: Keeper
+
+# One keeper pass every 5 minutes: trigger touched strikes, pay policies, sample volatility.
+# Uses a dedicated low-balance testnet key (secret KEEPER_KEY); anyone can run the same keeper.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: keeper
+  cancel-in-progress: false
+
+jobs:
+  keep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci -w keeper
+      - run: node keeper/keeper.mjs --once
+        env:
+          KEEPER_KEY: ${{ secrets.KEEPER_KEY }}

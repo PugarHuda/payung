@@ -68,7 +68,7 @@ contract PayungTest is Test {
     address bob = makeAddr("bob");
 
     function setUp() public {
-        vm.warp(1_760_000_000); // a Monday-ish timestamp, far from the epoch cutoff
+        vm.warp(2910 weeks); // an epoch start: a full week to expiry, so quotes match the one-week table exactly
         musd = new MockMUSD();
         feed = new MockPriceFeed();
         sigs = new MockSigs(musd);
@@ -87,7 +87,7 @@ contract PayungTest is Test {
     function _buy(address who, uint256 strike, uint256 cover, bool autoRepay) internal returns (uint256) {
         uint256 deadline = vault.currentExpiry() + 1 days;
         vm.prank(who);
-        return vault.buy(strike, cover, autoRepay, deadline, autoRepay ? bytes("sig") : bytes(""));
+        return vault.buy(strike, cover, type(uint256).max, autoRepay, deadline, autoRepay ? bytes("sig") : bytes(""));
     }
 
     function test_expiryIsThursdayMidnightUtc() public view {
@@ -116,29 +116,29 @@ contract PayungTest is Test {
     function test_rejectsBadStrikes() public {
         vm.startPrank(alice);
         vm.expectRevert("Payung: bad strike");
-        vault.buy(90_500e18, 100e18, false, 0, "");
+        vault.buy(90_500e18, 100e18, type(uint256).max, false, 0, "");
         vm.expectRevert("Payung: strike out of range");
-        vault.buy(97_000e18, 100e18, false, 0, ""); // 3% away
+        vault.buy(97_000e18, 100e18, type(uint256).max, false, 0, ""); // 3% away
         vm.expectRevert("Payung: strike out of range");
-        vault.buy(60_000e18, 100e18, false, 0, ""); // 40% away
+        vault.buy(60_000e18, 100e18, type(uint256).max, false, 0, ""); // 40% away
         vm.expectRevert("Payung: strike above spot");
-        vault.buy(101_000e18, 100e18, false, 0, "");
+        vault.buy(101_000e18, 100e18, type(uint256).max, false, 0, "");
         vm.expectRevert("Payung: bad repay signature");
-        vault.buy(90_000e18, 100e18, true, 0, "sig");
+        vault.buy(90_000e18, 100e18, type(uint256).max, true, 0, "sig");
         vm.stopPrank();
     }
 
     function test_cannotSellMoreCoverThanHeld() public {
         vm.prank(alice);
         vm.expectRevert("Payung: vault capacity");
-        vault.buy(70_000e18, 200_000e18, false, 0, "");
+        vault.buy(70_000e18, 200_000e18, type(uint256).max, false, 0, "");
     }
 
     function test_noSalesInLastHour() public {
         vm.warp(vault.currentExpiry() - 30 minutes);
         vm.prank(alice);
         vm.expectRevert("Payung: sales closed");
-        vault.buy(90_000e18, 100e18, false, 0, "");
+        vault.buy(90_000e18, 100e18, type(uint256).max, false, 0, "");
     }
 
     function test_touchPaysWallet() public {
@@ -192,6 +192,7 @@ contract PayungTest is Test {
     }
 
     function test_withdrawLimitedToFreeLiquidity() public {
+        vault.setMaxUtilization(10_000);
         _buy(alice, 90_000e18, 60_000e18, false);
         uint256 free = vault.freeLiquidity();
         assertLt(free, 50_000e18);
@@ -231,7 +232,7 @@ contract PayungTest is Test {
         vault.pause();
         vm.prank(bob);
         vm.expectRevert();
-        vault.buy(90_000e18, 1_000e18, false, 0, "");
+        vault.buy(90_000e18, 1_000e18, type(uint256).max, false, 0, "");
         feed.set(80_000e18);
         vault.trigger(90_000e18);
         vault.claim(id, address(0), address(0));
@@ -256,6 +257,105 @@ contract PayungTest is Test {
         vm.prank(alice);
         vm.expectRevert();
         vault.setPremiumTable(t);
+    }
+
+    function test_premiumDecaysWithTimeLeft() public {
+        (uint256 fullWeek,) = vault.quote(90_000e18, 1_000e18);
+        vm.warp(block.timestamp + 126 hours); // a quarter of the week left -> distance counts double
+        (uint256 lastDay,) = vault.quote(90_000e18, 1_000e18);
+        assertEq(lastDay, 1_000e18 * 25 / 10_000); // 10% below spot behaves like 20% over a full week: table[15]
+        assertLt(lastDay, fullWeek);
+    }
+
+    function test_navAccruesPremiumSmoothlyNotAtExpiry() public {
+        _buy(alice, 90_000e18, 20_000e18, false);
+        uint256 last = vault.totalAssets();
+        uint256 expiry = vault.activeExpiry();
+        for (uint256 t = block.timestamp + 1 days; t < expiry; t += 1 days) {
+            vm.warp(t);
+            uint256 nav = vault.totalAssets();
+            assertGe(nav, last); // premium releases to underwriters as risk decays
+            last = nav;
+        }
+        vm.warp(expiry);
+        uint256 jump = vault.totalAssets() - last;
+        assertLt(jump, 20_000e18 * 30 / 10_000); // only the table floor is left to release at expiry
+    }
+
+    function test_volatilityTracksMezoPrice() public {
+        assertEq(vault.volatility(), 0.5e18);
+        vault.poke(); // first sample only records the price
+        vm.expectRevert("Payung: too soon");
+        vault.poke();
+        // BTC swings 3% every hour for a day: far above 50% annualised.
+        for (uint256 i; i < 24; ++i) {
+            vm.warp(block.timestamp + 1 hours);
+            feed.set(i % 2 == 0 ? 97_000e18 : 100_000e18);
+            vault.poke();
+        }
+        uint256 hot = vault.volatility();
+        assertGt(hot, 1e18);
+        (uint256 premiumHot,) = vault.quote(90_000e18, 1_000e18);
+        // Then a flat week drifts vol down to the floor.
+        for (uint256 i; i < 7 * 24; ++i) {
+            vm.warp(block.timestamp + 1 hours);
+            vault.poke();
+        }
+        assertEq(vault.volatility(), vault.VOL_FLOOR());
+        vm.warp(2912 weeks); // a fresh epoch, full week to expiry
+        (uint256 premiumCalm,) = vault.quote(90_000e18, 1_000e18);
+        assertLt(premiumCalm, premiumHot);
+    }
+
+    function test_longGapRestartsSampling() public {
+        vault.poke();
+        vm.warp(block.timestamp + 3 days);
+        feed.set(50_000e18); // a crash across a 3-day gap is not one annualised sample
+        vault.poke();
+        assertEq(vault.volatility(), 0.5e18);
+    }
+
+    function test_maxPremiumProtectsBuyer() public {
+        (uint256 premium,) = vault.quote(90_000e18, 1_000e18);
+        feed.set(95_000e18); // price falls after the quote: cover is now dearer
+        vm.prank(alice);
+        vm.expectRevert("Payung: premium moved");
+        vault.buy(90_000e18, 1_000e18, premium, false, 0, "");
+    }
+
+    function test_utilizationCapsWeeklyLoss() public {
+        assertEq(vault.coverCapacity(), 50_000e18);
+        _buy(alice, 90_000e18, 40_000e18, false);
+        vm.prank(bob);
+        vm.expectRevert("Payung: vault capacity");
+        vault.buy(80_000e18, 20_000e18, type(uint256).max, false, 0, "");
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.setMaxUtilization(10_000);
+        vm.expectRevert("Payung: bad utilization");
+        vault.setMaxUtilization(10_001);
+    }
+
+    function test_holderCanRearmAutoRepay() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, false);
+        uint256 deadline = vault.activeExpiry() + 1 days;
+        vm.prank(bob);
+        vm.expectRevert("Payung: not holder");
+        vault.setAutoRepay(id, true, deadline, "sig");
+        vm.prank(alice);
+        vm.expectRevert("Payung: bad repay signature");
+        vault.setAutoRepay(id, true, 0, "sig");
+        vm.prank(alice);
+        vault.setAutoRepay(id, true, deadline, "sig2");
+        assertTrue(vault.policy(id).autoRepay);
+
+        feed.set(85_000e18);
+        vault.trigger(90_000e18);
+        vault.claim(id, address(0), address(0));
+        assertEq(sigs.repaid(alice), 1_000e18);
+        vm.prank(alice);
+        vm.expectRevert("Payung: already paid");
+        vault.setAutoRepay(id, false, 0, "");
     }
 
     function testFuzz_vaultAlwaysSolvent(uint256 strikeK, uint256 cover, uint256 dropBps) public {

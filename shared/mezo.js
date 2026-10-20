@@ -12,7 +12,7 @@ export const mezoTestnet = defineChain({
 })
 
 export const ADDR = {
-  payung: '0x5eFFEe5B8b817E7A1B785C1a97487C6394cb6b87',
+  payung: '0xaDe0CA33Ed6b6616BE87E3623fDCe38C4dd84633',
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
   troveManager: '0xE47c80e8c23f6B4A1aE41c34837a0599D5D16bb0',
@@ -34,7 +34,13 @@ export const mezoAbi = parseAbi([
   'function getApproxHint(uint256 cr, uint256 numTrials, uint256 seed) view returns (address hint, uint256 diff, uint256 seedOut)',
   'function computeNominalCR(uint256 coll, uint256 debt) pure returns (uint256)',
   'function findInsertPosition(uint256 nicr, address prev, address next) view returns (address, address)',
+  'function checkRecoveryMode(uint256 price) view returns (bool)',
+  'function getTCR(uint256 price) view returns (uint256)',
+  'function getCurrentICR(address borrower, uint256 price) view returns (uint256)',
+  'function repayMUSDWithSignature(uint256 amount, address upperHint, address lowerHint, address borrower, bytes signature, uint256 deadline)',
 ])
+
+export const EXPLORER_API = 'https://api.explorer.test.mezo.org/api/v2'
 
 // EIP-712 for Mezo's BorrowerOperationsSignatures.repayMUSDWithSignature
 export const repayTypedData = ({ amount, borrower, nonce, deadline }) => ({
@@ -67,6 +73,24 @@ export async function repayHints(client, borrower, amount) {
   return client.readContract({
     address: ADDR.sortedTroves, abi: mezoAbi, functionName: 'findInsertPosition', args: [nicr, approx, approx],
   })
+}
+
+/// Dry-runs a policy's payout repay as the vault (eth_call from the vault, which holds the MUSD
+/// Mezo burns). Returns null if the repay would land in the trove, else Mezo's revert reason:
+/// a used-up nonce, expired deadline or the 1,800 MUSD minimum debt sends the payout to the wallet instead.
+export async function autoRepayProblem(client, vault, policy) {
+  if (!policy.autoRepay) return 'auto-repay is off'
+  if (BigInt(Math.floor(Date.now() / 1000)) > policy.sigDeadline) return 'signature deadline passed'
+  try {
+    const [upper, lower] = await repayHints(client, policy.holder, policy.cover)
+    await client.simulateContract({
+      account: vault, address: ADDR.sigs, abi: mezoAbi, functionName: 'repayMUSDWithSignature',
+      args: [policy.cover, upper, lower, policy.holder, policy.signature, policy.sigDeadline],
+    })
+    return null
+  } catch (e) {
+    return e.walk?.((x) => x.reason)?.reason ?? e.shortMessage ?? e.message
+  }
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

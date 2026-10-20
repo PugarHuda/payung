@@ -146,3 +146,16 @@ footer { margin-top: 64px; font-size: 0.85rem; color: var(--mist); }
 @media (prefers-reduced-motion: no-preference) {
   .gauge .canopy { transition: transform 0.35s ease; }
 }
+
+/* v2: notes, activity, small actions */
+h2 { font: 700 1.35rem/1.2 'Bricolage Grotesque', sans-serif; margin: 3rem 0 0.75rem; }
+.note { background: var(--card); border-left: 3px solid var(--danger); padding: 0.6rem 0.9rem; margin: -0.75rem 0 1.5rem; max-width: 60ch; font-size: 0.92rem; }
+.fine { color: var(--mist); font-size: 0.85rem; max-width: 60ch; margin: -0.5rem 0 1rem; }
+button.small { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
+.warn-inline { color: var(--danger); font-size: 0.9rem; }
+.picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.picker img { vertical-align: -3px; }
+.activity { list-style: none; padding: 0; margin: 0; max-width: 760px; }
+.activity li { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 0.95rem; }
+.activity li a { color: var(--mist); white-space: nowrap; font-size: 0.85rem; }
+.facts dd small { font-weight: 400; }

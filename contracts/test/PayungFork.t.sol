@@ -62,6 +62,10 @@ contract PayungForkTest is Test {
     }
 
     function _signRepay(uint256 amount, uint256 deadline) internal view returns (bytes memory) {
+        return _signRepay(amount, deadline, ISigs(SIGS).getNonce(borrower));
+    }
+
+    function _signRepay(uint256 amount, uint256 deadline, uint256 nonce) internal view returns (bytes memory) {
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -72,7 +76,7 @@ contract PayungForkTest is Test {
             )
         );
         bytes32 structHash =
-            keccak256(abi.encode(REPAY_TYPEHASH, amount, borrower, ISigs(SIGS).getNonce(borrower), deadline));
+            keccak256(abi.encode(REPAY_TYPEHASH, amount, borrower, nonce, deadline));
         (uint8 v, bytes32 r, bytes32 s) =
             vm.sign(borrowerKey, keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash)));
         return abi.encodePacked(r, s, v);
@@ -96,7 +100,7 @@ contract PayungForkTest is Test {
 
         vm.startPrank(borrower);
         IERC20(MUSD).approve(address(vault), type(uint256).max);
-        uint256 id = vault.buy(strike, cover, true, deadline, sig);
+        uint256 id = vault.buy(strike, cover, type(uint256).max, true, deadline, sig);
         vm.stopPrank();
 
         (, uint256 principalBefore, uint256 interestBefore,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
@@ -111,5 +115,32 @@ contract PayungForkTest is Test {
         assertApproxEqAbs(principalBefore + interestBefore - (principalAfter + interestAfter), cover, 1e15);
         assertEq(IERC20(MUSD).balanceOf(borrower), walletBefore); // paid into the trove, not the wallet
         assertEq(vault.totalOwed(), 0);
+    }
+
+    /// A signature made with a nonce Mezo no longer accepts is replaced by the holder before the touch.
+    function test_fork_rearmedSignatureRepaysRealTrove() public {
+        _openTrove(lp, 20_000e18);
+        vm.startPrank(lp);
+        IERC20(MUSD).approve(address(vault), type(uint256).max);
+        vault.deposit(15_000e18, lp);
+        vm.stopPrank();
+
+        _openTrove(borrower, 5_000e18);
+        uint256 strike = (IPriceFeed(PRICE_FEED).fetchPrice() * 90 / 100) / 1000e18 * 1000e18;
+        uint256 deadline = vault.currentExpiry() + 1 days;
+        uint256 nonce = ISigs(SIGS).getNonce(borrower);
+        vm.startPrank(borrower);
+        IERC20(MUSD).approve(address(vault), type(uint256).max);
+        uint256 id = vault.buy(strike, 1_000e18, type(uint256).max, true, deadline, _signRepay(1_000e18, deadline, nonce + 1));
+        vault.setAutoRepay(id, true, deadline, _signRepay(1_000e18, deadline, nonce));
+        vm.stopPrank();
+
+        (, uint256 principalBefore,,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
+        _setPrice(strike);
+        vault.trigger(strike);
+        vault.claim(id, address(0), address(0));
+        (, uint256 principalAfter,,,,) = ITroveManager(TROVE_MANAGER).getEntireDebtAndColl(borrower);
+        assertApproxEqAbs(principalBefore - principalAfter, 1_000e18, 1e15);
+        assertEq(ISigs(SIGS).getNonce(borrower), nonce + 1);
     }
 }

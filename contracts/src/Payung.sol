@@ -33,7 +33,9 @@ interface IBorrowerOperationsSignatures {
 /// one-touch cover: if the Mezo BTC price touches the strike before expiry
 /// (Thursday 00:00 UTC, the Mezo Earn epoch boundary), the cover pays a fixed MUSD
 /// amount, either straight into the borrower's trove (pre-signed repay) or to their wallet.
-/// Every policy is fully collateralised: the vault never sells more cover than it holds.
+/// Every policy is fully collateralised, and open cover never exceeds `maxUtilization` of the vault.
+/// Premiums scale with time left in the epoch and with BTC volatility measured on-chain from
+/// Mezo's own PriceFeed (`poke`), so no external vol oracle is trusted.
 contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -48,6 +50,12 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant TABLE_SIZE = 26; // one entry per 1% from 5% to 30%
     // Leaves room for the repay so a keeper cannot starve it into the fallback path.
     uint256 public constant REPAY_GAS = 800_000;
+    uint256 public constant VOL_REF = 0.5e18; // annualised vol the premium table was built for
+    uint256 public constant VOL_FLOOR = 0.35e18; // calm markets never price cover below this vol
+    uint256 public constant VOL_CAP = 2e18;
+    uint256 public constant OBSERVE_INTERVAL = 15 minutes; // min spacing of vol samples
+    uint256 public constant OBSERVE_MAX_GAP = 1 days; // longer gaps restart sampling instead of one huge sample
+    uint256 public constant VOL_TAU = 1 days; // EWMA time constant
 
     IPriceFeed public immutable priceFeed;
     IBorrowerOperationsSignatures public immutable borrowerOpsSigs;
@@ -81,6 +89,13 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public activeExpiry;
     uint256 public activeCover; // untriggered cover of the active epoch (locked collateral)
     uint256 public totalOwed; // triggered cover not yet paid out
+    uint256 public maxUtilization = 5000; // bps of (vault MUSD - owed) that open cover may lock
+
+    // EWMA of annualised variance (wad) of BTC returns sampled from the Mezo PriceFeed.
+    // ponytail: simple returns at >=15 min spacing; fine for 15 min-1 day steps, not tick data.
+    uint256 public variance = VOL_REF * VOL_REF / 1e18;
+    uint128 public lastObservedPrice;
+    uint64 public lastObservedAt;
 
     event PolicyBought(
         uint256 indexed id, address indexed holder, uint256 expiry, uint256 strike, uint256 cover, uint256 premium, bool autoRepay
@@ -88,6 +103,9 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     event StrikeTriggered(uint256 indexed expiry, uint256 indexed strike, uint256 price, uint256 cover);
     event PolicyPaid(uint256 indexed id, address indexed holder, uint256 cover, bool repaidTrove);
     event PremiumTableUpdated(uint16[TABLE_SIZE] table);
+    event MaxUtilizationUpdated(uint256 bps);
+    event VolatilityObserved(uint256 price, uint256 volatility);
+    event AutoRepayUpdated(uint256 indexed id, bool autoRepay, uint256 sigDeadline);
 
     constructor(IERC20 musd, IPriceFeed priceFeed_, IBorrowerOperationsSignatures borrowerOpsSigs_, address owner_)
         ERC20("Payung MUSD Cover Vault", "pyMUSD")
@@ -107,10 +125,18 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// @notice Buy one-touch cover for the current epoch.
     /// @param strike BTC price (18 decimals) that triggers the payout; multiple of STRIKE_STEP.
     /// @param cover MUSD paid out if the price touches `strike` before expiry.
+    /// @param maxPremium Reverts if the premium at execution exceeds this (price or vol moved).
     /// @param autoRepay If true, the payout repays the buyer's trove using `signature`, a
     /// RepayMUSD(cover, buyer, nonce, sigDeadline) signature for Mezo's BorrowerOperationsSignatures.
     /// Falls back to a wallet transfer if the repay is no longer valid.
-    function buy(uint256 strike, uint256 cover, bool autoRepay, uint256 sigDeadline, bytes calldata signature)
+    function buy(
+        uint256 strike,
+        uint256 cover,
+        uint256 maxPremium,
+        bool autoRepay,
+        uint256 sigDeadline,
+        bytes calldata signature
+    )
         external
         nonReentrant
         whenNotPaused
@@ -126,6 +152,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         require(strike < price, "Payung: strike above spot");
         uint256 distance = (price - strike) * BPS / price;
         require(distance >= MIN_DISTANCE_BPS && distance <= MAX_DISTANCE_BPS, "Payung: strike out of range");
+        _observe(price);
 
         if (activeExpiry != expiry) {
             // Previous epoch is over (sales stop before expiry), so its untriggered cover is void.
@@ -140,9 +167,11 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
             _strikeList[expiry].push(strike);
         }
 
-        uint256 premium = Math.mulDiv(cover, touchProbability(distance), BPS, Math.Rounding.Ceil);
+        uint256 premium =
+            Math.mulDiv(cover, premiumRate(price, strike, expiry - block.timestamp), BPS, Math.Rounding.Ceil);
+        require(premium <= maxPremium, "Payung: premium moved");
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), premium);
-        require(freeLiquidity() >= cover, "Payung: vault capacity");
+        require(cover <= coverCapacity(), "Payung: vault capacity");
 
         s.cover += cover;
         activeCover += cover;
@@ -172,6 +201,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         require(s.cover > 0 && !s.triggered, "Payung: nothing to trigger");
         uint256 price = priceFeed.fetchPrice();
         require(price <= strike, "Payung: not touched");
+        _observe(price);
 
         s.triggered = true;
         activeCover -= s.cover;
@@ -202,9 +232,62 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         emit PolicyPaid(id, p.holder, p.cover, false);
     }
 
+    /// @notice Holder re-signs (or turns off) auto-repay, e.g. after another Mezo signature
+    /// action used up the nonce the original signature was made with.
+    function setAutoRepay(uint256 id, bool autoRepay, uint256 sigDeadline, bytes calldata signature) external {
+        Policy storage p = _policies[id];
+        require(msg.sender == p.holder, "Payung: not holder");
+        require(!p.claimed, "Payung: already paid");
+        if (autoRepay) require(sigDeadline >= p.expiry && signature.length > 0, "Payung: bad repay signature");
+        p.autoRepay = autoRepay;
+        p.sigDeadline = sigDeadline;
+        p.signature = autoRepay ? signature : bytes("");
+        emit AutoRepayUpdated(id, autoRepay, sigDeadline);
+    }
+
+    // ------------------------------------------------------------------ volatility
+
+    /// @notice Permissionless: sample the Mezo price into the on-chain volatility estimate.
+    function poke() external {
+        require(_observe(priceFeed.fetchPrice()), "Payung: too soon");
+    }
+
+    /// @notice Annualised BTC volatility (wad): EWMA of Mezo PriceFeed returns, clamped to [35%, 200%].
+    function volatility() public view returns (uint256) {
+        return Math.min(Math.max(Math.sqrt(variance * 1e18), VOL_FLOOR), VOL_CAP);
+    }
+
+    function _observe(uint256 price) internal returns (bool) {
+        uint256 dt = block.timestamp - lastObservedAt;
+        if (dt < OBSERVE_INTERVAL) return false;
+        uint256 last = lastObservedPrice;
+        if (last != 0 && dt <= OBSERVE_MAX_GAP) {
+            uint256 r = (price > last ? price - last : last - price) * 1e18 / last;
+            uint256 sample = Math.mulDiv(r * r / 1e18, 365 days, dt); // annualised variance of this step
+            uint256 w = dt * 1e18 / (dt + VOL_TAU);
+            variance = (variance * (1e18 - w) + sample * w) / 1e18;
+        }
+        lastObservedPrice = uint128(price);
+        lastObservedAt = uint64(block.timestamp);
+        emit VolatilityObserved(price, volatility());
+        return true;
+    }
+
     // ------------------------------------------------------------------ pricing
 
-    /// @notice Touch probability in bps (premium per unit of cover) for a strike `distanceBps` below spot.
+    /// @notice Premium per unit of cover (bps) for `strike` with `remaining` seconds to expiry.
+    /// A one-touch probability depends on distance / (vol * sqrt(time)), so the distance is
+    /// rescaled onto the one-week, 50%-vol table: cover gets cheaper as the week runs out,
+    /// and the NAV mark decays smoothly instead of jumping at expiry.
+    function premiumRate(uint256 price, uint256 strike, uint256 remaining) public view returns (uint256) {
+        if (price <= strike) return BPS;
+        if (remaining == 0) return 0;
+        uint256 distance = (price - strike) * BPS / price;
+        uint256 timeScale = Math.sqrt(EPOCH * 1e36 / Math.min(remaining, EPOCH)); // sqrt(week / remaining), wad
+        return touchProbability(Math.mulDiv(distance, VOL_REF * timeScale, volatility() * 1e18));
+    }
+
+    /// @notice Touch probability in bps for a strike `distanceBps` below spot, one week at 50% vol.
     function touchProbability(uint256 distanceBps) public view returns (uint256) {
         if (distanceBps >= MAX_DISTANCE_BPS) return premiumTable[TABLE_SIZE - 1];
         if (distanceBps < MIN_DISTANCE_BPS) {
@@ -218,12 +301,13 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         return a - (a - b) * frac / 100; // table is non-increasing
     }
 
-    /// @notice Premium for `cover` at `strike`, at the current Mezo price.
+    /// @notice Premium for `cover` at `strike`, at the current Mezo price, vol and time to expiry.
     function quote(uint256 strike, uint256 cover) external view returns (uint256 premium, uint256 distanceBps) {
         uint256 price = priceFeed.fetchPrice();
         require(strike < price, "Payung: strike above spot");
         distanceBps = (price - strike) * BPS / price;
-        premium = Math.mulDiv(cover, touchProbability(distanceBps), BPS, Math.Rounding.Ceil);
+        uint256 remaining = currentExpiry() - block.timestamp;
+        premium = Math.mulDiv(cover, premiumRate(price, strike, remaining), BPS, Math.Rounding.Ceil);
     }
 
     function setPremiumTable(uint16[TABLE_SIZE] calldata table) external onlyOwner {
@@ -233,6 +317,13 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         }
         premiumTable = table;
         emit PremiumTableUpdated(table);
+    }
+
+    /// @notice Caps open cover at `bps` of the vault, bounding what underwriters can lose in one week.
+    function setMaxUtilization(uint256 bps) external onlyOwner {
+        require(bps > 0 && bps <= BPS, "Payung: bad utilization");
+        maxUtilization = bps;
+        emit MaxUtilizationUpdated(bps);
     }
 
     /// @notice Pauses new cover only. Deposits, withdrawals, triggers and claims keep working.
@@ -265,16 +356,12 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         } catch {
             return activeCover;
         }
+        uint256 remaining = activeExpiry - block.timestamp;
         uint256[] storage list = _strikeList[activeExpiry];
         for (uint256 i; i < list.length; ++i) {
             Strike storage s = strikes[activeExpiry][list[i]];
             if (s.triggered) continue;
-            if (price <= list[i]) {
-                liability += s.cover;
-            } else {
-                uint256 distance = (price - list[i]) * BPS / price;
-                liability += Math.mulDiv(s.cover, touchProbability(distance), BPS, Math.Rounding.Ceil);
-            }
+            liability += Math.mulDiv(s.cover, premiumRate(price, list[i], remaining), BPS, Math.Rounding.Ceil);
         }
     }
 
@@ -283,6 +370,15 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         uint256 balance = IERC20(asset()).balanceOf(address(this));
         uint256 reserved = totalOwed + (block.timestamp < activeExpiry ? activeCover : 0);
         return balance > reserved ? balance - reserved : 0;
+    }
+
+    /// @notice Cover that can still be sold this epoch under `maxUtilization`.
+    function coverCapacity() public view returns (uint256) {
+        uint256 balance = IERC20(asset()).balanceOf(address(this));
+        if (balance <= totalOwed) return 0;
+        uint256 cap = (balance - totalOwed) * maxUtilization / BPS;
+        uint256 used = block.timestamp < activeExpiry ? activeCover : 0;
+        return cap > used ? cap - used : 0;
     }
 
     function maxWithdraw(address owner_) public view override returns (uint256) {

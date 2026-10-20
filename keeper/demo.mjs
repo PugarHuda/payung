@@ -33,6 +33,7 @@ const deadline = expiry + 86400n
 const nonce = await pub.readContract({ address: ADDR.sigs, abi: mezoAbi, functionName: 'getNonce', args: [account.address] })
 const signature = await wallet.signTypedData(repayTypedData({ amount: cover, borrower: account.address, nonce, deadline }))
 console.log(`strike $${formatUnits(strike, 18)} (${Number(distance) / 100}% below), premium ${formatUnits(premium, 18)} MUSD`)
-await tx('buy', payung, payungAbi, 'buy', [strike, cover, true, deadline, signature])
+const maxPremium = (premium * 101n) / 100n // 1% slippage guard
+await tx('buy', payung, payungAbi, 'buy', [strike, cover, maxPremium, true, deadline, signature])
 
 console.log('NAV', formatUnits(await read('totalAssets'), 18), '· free', formatUnits(await read('freeLiquidity'), 18))

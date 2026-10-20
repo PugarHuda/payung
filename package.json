@@ -8,7 +8,13 @@
   "scripts": {
     "keeper": "npm run start -w keeper",
     "dev": "npm run dev -w app",
-    "build": "npm run build -w app"
+    "build": "npm run build -w app",
+    "test:contracts": "cd contracts && forge test --no-match-contract Fork",
+    "test:fork": "cd contracts && forge test --match-contract PayungFork --fork-url https://rpc.test.mezo.org",
+    "test:e2e": "playwright test"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
 }

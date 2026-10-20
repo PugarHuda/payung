@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Unit and fuzz tests
+        run: forge test --no-match-contract Fork -vv
+        working-directory: contracts
+      - name: Fork tests against the live MUSD system on Mezo testnet
+        run: forge test --match-contract PayungFork --fork-url https://rpc.test.mezo.org -vv
+        working-directory: contracts
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx oxlint app/src
+      - run: npx playwright install --with-deps chromium
+      - name: End-to-end, read-only (no wallet key in CI)
+        run: npx playwright test -g "without a wallet"
+        env:
+          E2E_CHANNEL: chromium
