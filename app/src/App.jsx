@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits } from 'viem'
+import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress } from 'viem'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, GAS } from '../../shared/mezo.js'
 import './App.css'
 
-const PAYUNG = new URLSearchParams(location.search).get('vault') ?? ADDR.payung
+// ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
+const override = new URLSearchParams(location.search).get('vault')
+const PAYUNG = import.meta.env.DEV && override && isAddress(override) ? override : ADDR.payung
 const ZERO = '0x0000000000000000000000000000000000000000'
 const STEP = 1000n * 10n ** 18n
 const MCR = 110n // liquidation at 110% collateral ratio
@@ -121,7 +123,8 @@ export default function App() {
         {account ? <span className="acct">{account.slice(0, 6)}…{account.slice(-4)}</span> : <button className="primary" onClick={connect}>Connect wallet</button>}
       </header>
 
-      {!deployed && <p className="banner">Vault address not set. Open this page with <code>?vault=0x…</code> after deploying.</p>}
+      {!deployed && <p className="banner">Vault address not set. Add it to <code>shared/mezo.js</code> after deploying.</p>}
+      {PAYUNG !== ADDR.payung && <p className="banner error">Dev override: using vault {PAYUNG}, not the published Payung vault.</p>}
       {notice && <p className={`banner ${notice.kind}`} role="status">{notice.text}</p>}
 
       {tab === 'protect' && <Protect {...{ chain, me, account, wallet, busy, run, write, ensureAllowance, readP, connect }} />}
