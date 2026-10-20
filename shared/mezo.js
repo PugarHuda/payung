@@ -12,7 +12,7 @@ export const mezoTestnet = defineChain({
 })
 
 export const ADDR = {
-  payung: '0xaDe0CA33Ed6b6616BE87E3623fDCe38C4dd84633',
+  payung: '0x7F9f315304450d5E78475223374545B8B9b873A0',
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
   troveManager: '0xE47c80e8c23f6B4A1aE41c34837a0599D5D16bb0',

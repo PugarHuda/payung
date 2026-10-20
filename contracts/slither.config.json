@@ -1,0 +1,6 @@
+{
+  "filter_paths": "lib/|test/|script/",
+  "exclude_dependencies": true,
+  "detectors_to_exclude": "timestamp",
+  "_why": "timestamp: weekly epochs and sale cut-off are time-based by design; a validator's ~seconds of skew is irrelevant at hour/week granularity"
+}

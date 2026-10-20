@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, decodeEventLog } from 'viem'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, autoRepayProblem, EXPLORER_API, GAS } from '../../shared/mezo.js'
+import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, decodeEventLog, parseEventLogs } from 'viem'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, EXPLORER_API, GAS } from '../../shared/mezo.js'
 import './App.css'
 
 // ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
@@ -16,7 +16,8 @@ const TARGET_CR = 150n // cover sized to lift the trove back to 150% at the stri
 const SLIPPAGE = 101n // accept a premium up to 1% above the quote
 const ALERT_BAND = 103n // notify when BTC is within 3% of an active strike
 const EXPLORER = mezoTestnet.blockExplorers.default.url
-const pub = createPublicClient({ chain: mezoTestnet, transport: http() })
+// VITE_MEZO_RPC points the app at another node, e.g. the anvil fork the touch e2e test runs.
+const pub = createPublicClient({ chain: mezoTestnet, transport: http(import.meta.env.VITE_MEZO_RPC, { timeout: 30_000 }) }) // slow RPCs exist; viem defaults to 10 s
 
 const usd = (v, d = 0) => (v == null ? '…' : '$' + Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }))
 const musd = (v, d = 2) => (v == null ? '…' : Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }) + ' MUSD')
@@ -24,12 +25,17 @@ const pct = (wad, d = 1) => (wad == null ? '…' : Number(formatUnits(wad, 16)).
 const date = (t) => new Date(Number(t) * 1000).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC'
 const roundUp = (v, step) => ((v + step - 1n) / step) * step
 const nowSec = () => BigInt(Math.floor(Date.now() / 1000))
+const ago = (t) => {
+  const m = Math.round(Number(nowSec() - t) / 60)
+  return m < 1 ? 'just now' : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`
+}
 const left = (t) => {
   const s = Number(t - nowSec())
   if (s <= 0) return 'ended'
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60)
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
 }
+const ratio = (coll, price, debt) => `${((Number(coll) * Number(price)) / Number(debt) / 1e16).toFixed(0)}%`
 const parseAmount = (s) => {
   try {
     return s ? parseUnits(s, 18) : 0n
@@ -48,6 +54,7 @@ const REVERTS = {
 }
 function explain(e) {
   if (e?.walk?.((x) => x.code === 4001) || /rejected|denied/i.test(e?.message ?? '')) return 'You cancelled the request in your wallet.'
+  if (e?.walk?.((x) => x.name === 'InsufficientFundsError')) return 'Your wallet has too little BTC to pay the gas. Get testnet BTC from the Mezo faucet (faucet.test.mezo.org) and try again.'
   const reason = e?.walk?.((x) => x.reason)?.reason
   return REVERTS[reason] ?? reason ?? e?.shortMessage ?? e?.message ?? String(e)
 }
@@ -110,17 +117,47 @@ export default function App() {
     }
   }, [provider])
 
-  const refresh = useCallback(async () => {
+  // One refresh at a time: on a slow RPC the 15 s timer would otherwise stack them up.
+  // A refresh asked for mid-flight (e.g. right after a transaction) runs once the current one ends.
+  const inflight = useRef(null)
+  const again = useRef(false)
+  const refresh = useCallback(() => {
+    if (inflight.current) {
+      again.current = true
+      return inflight.current
+    }
+    inflight.current = load().finally(() => {
+      inflight.current = null
+      if (again.current) {
+        again.current = false
+        refresh() // not returned: awaiting callers must not wait on an endless chain of refreshes
+      }
+    })
+    return inflight.current
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account])
+
+  const load = async () => {
     const price = await readM(ADDR.priceFeed, 'fetchPrice').catch(() => null)
-    const [nav, free, capacity, activeCover, activeExpiry, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr] = await Promise.all([
+    const [nav, free, capacity, activeCover, activeExpiry, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt] = await Promise.all([
       readP('totalAssets'), readP('freeLiquidity'), readP('coverCapacity'), readP('activeCover'), readP('activeExpiry'),
       readP('currentExpiry'), readP('totalSupply'), readP('volatility'), readP('maxUtilization'),
       readM(ADDR.musd, 'balanceOf', [PAYUNG]), readP('totalOwed'),
       price ? readM(ADDR.troveManager, 'checkRecoveryMode', [price]) : null,
       price ? readM(ADDR.troveManager, 'getTCR', [price]) : null,
+      readP('lastObservedAt'),
     ])
-    const locked = nowSec() < activeExpiry ? activeCover : 0n
-    setChain({ price, nav, free, capacity, activeCover: locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr })
+    const live = nowSec() < activeExpiry
+    // Strikes BTC is at or under that nobody has triggered yet: anyone can trigger and earn the reward.
+    const touchable = []
+    if (live && price) {
+      for (const strike of await readP('strikeList', [activeExpiry])) {
+        if (price > strike) continue
+        const [cover, triggered] = await readP('strikes', [activeExpiry, strike])
+        if (!triggered) touchable.push({ strike, cover, reward: await readP('triggerReward', [cover]) })
+      }
+    }
+    setChain({ price, nav, free, capacity, activeCover: live ? activeCover : 0n, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, touchable })
     if (!account) return
     const [debtColl, status, bal, code, shares, ids] = await Promise.all([
       readM(ADDR.troveManager, 'getEntireDebtAndColl', [account]),
@@ -139,12 +176,14 @@ export default function App() {
         const p = await readP('policy', [id])
         const [, triggered] = await readP('strikes', [p.expiry, p.strike])
         const live = !p.claimed && (triggered || nowSec() < p.expiry)
-        const problem = live && p.autoRepay ? await autoRepayProblem(pub, PAYUNG, p) : null
-        return { id, ...p, triggered, live, problem }
+        return { id, ...p, triggered, live, problem: live && p.autoRepay ? undefined : null } // undefined: still checking
       }),
     )
     setMe(mine)
-  }, [account, readM, readP])
+    // The repay dry-run is the slow part; show the table first and fill it in.
+    const problems = await Promise.all(mine.policies.map((p) => (p.problem === undefined ? autoRepayProblem(pub, PAYUNG, p) : null)))
+    setMe((m) => (m.policies !== mine.policies ? m : { ...m, policies: mine.policies.map((p, i) => ({ ...p, problem: problems[i] })) }))
+  }
 
   useEffect(() => {
     const tick = () => refresh().catch((e) => console.warn('refresh failed', e))
@@ -211,7 +250,7 @@ export default function App() {
     try {
       const { text, hash } = await fn()
       setNotice({ kind: 'ok', text, hash })
-      await refresh()
+      refresh().catch((e) => console.warn('refresh failed', e))
     } catch (e) {
       setNotice({ kind: 'error', text: explain(e) })
     } finally {
@@ -223,8 +262,10 @@ export default function App() {
     const req = { account, address, abi, functionName, args }
     await pub.simulateContract(req) // a revert reason now beats a failed transaction later
     const hash = await wallet.writeContract({ ...req, gas: GAS })
-    const r = await pub.waitForTransactionReceipt({ hash })
-    if (r.status !== 'success') throw new Error(`Transaction failed: ${hash}`)
+    const r = await pub.waitForTransactionReceipt({ hash, timeout: 180_000 }).catch(() => {
+      throw new Error(`Sent, but Mezo has not confirmed it after 3 minutes. Check ${EXPLORER}/tx/${hash}`)
+    })
+    if (r.status !== 'success') throw new Error(`Transaction failed: ${EXPLORER}/tx/${hash}`)
     return hash
   }
 
@@ -308,7 +349,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
     if (me.hasTrove) {
       const need = me.debt - (me.coll * s * 100n) / TARGET_CR / WAD
       setCover(need > MIN_COVER ? (roundUp(need, MIN_COVER) / WAD).toString() : '100')
-    } else setCover('500')
+    } else setCover('100')
   }, [price, liq, me, account, strike, minStrike, maxStrike])
 
   const autoRepay = wantRepay && !me.smartAccount // smart accounts can't sign Mezo's ECDSA repay
@@ -382,8 +423,16 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <span>Cover amount (MUSD)</span>
           <input inputMode="decimal" value={cover} aria-invalid={!!coverError || tooBig} onChange={(e) => setCover(e.target.value.replace(/[^0-9.]/g, ''))} />
           {coverError && <em className="warn">{coverError}</em>}
-          {tooBig && <em className="warn">The vault can back {musd(capacity, 0)} more this week. Lower the cover.</em>}
+          {tooBig && (capacity < MIN_COVER
+            ? <em className="warn">This week's cover is fully booked. Capacity grows when underwriters deposit, and resets at {date(expiry)}.</em>
+            : <em className="warn">The vault can back {musd(capacity, 0)} more this week. Lower the cover.</em>)}
         </label>
+
+        {me.hasTrove && strike && coverWei > 0n && autoRepay && me.debt > coverWei && (
+          <p className="fine">
+            At {usd(strike)} your loan sits at {ratio(me.coll, strike, me.debt)} collateral. The payout repays {musd(coverWei, 0)} and lifts it to {ratio(me.coll, strike, me.debt - coverWei)}.
+          </p>
+        )}
 
         <label className="check">
           <input type="checkbox" checked={autoRepay} disabled={!!me.smartAccount} onChange={(e) => setAutoRepay(e.target.checked)} />
@@ -456,6 +505,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
       <p className="lede">
         Your MUSD backs weekly cover. Borrowers pay premiums into the vault every week. If BTC touches a strike, the vault pays that cover.
         Every policy is fully backed, and open cover is capped at {chain.maxUtil != null ? Number(chain.maxUtil) / 100 : '…'}% of the vault, so that is the most it can lose in one week.
+        Whoever triggers a touched strike earns 0.1% of its cover (up to 10 MUSD), so anyone can help watch the price.
       </p>
       <dl className="facts">
         <div><dt>Vault value</dt><dd>{musd(chain.nav, 0)}</dd></div>
@@ -464,7 +514,22 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
         <div><dt>Free to withdraw</dt><dd>{musd(chain.free, 0)}</dd></div>
         <div><dt>1 pyMUSD</dt><dd>{sharePrice.toFixed(4)} MUSD</dd></div>
         <div><dt>BTC volatility (on-chain)</dt><dd>{pct(chain.vol, 0)}</dd></div>
+        <div><dt>Last price sample</dt><dd>{chain.observedAt == null ? '…' : chain.observedAt === 0n ? 'none yet' : ago(chain.observedAt)}</dd></div>
       </dl>
+
+      {chain.touchable?.length > 0 && (
+        <div className="banner ok">
+          {chain.touchable.map((t) => (
+            <p key={t.strike}>
+              BTC touched the {usd(t.strike)} strike ({musd(t.cover, 0)} of cover) and nobody has triggered it yet.{' '}
+              <button className="small" disabled={!canWrite || !!busy} onClick={() => run('trigger', async () => {
+                const hash = await write(PAYUNG, payungAbi, 'trigger', [t.strike])
+                return { hash, text: `Triggered ${usd(t.strike)}. You earned ${musd(t.reward)}; the cover is now owed to its holders.` }
+              })}>{account ? `Trigger it and earn ${musd(t.reward)}` : 'Connect a wallet to trigger it'}</button>
+            </p>
+          ))}
+        </div>
+      )}
 
       {account ? (
         <div className="split">
@@ -513,7 +578,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
 function describe({ eventName, args }) {
   switch (eventName) {
     case 'PolicyBought': return `Cover bought: ${musd(args.cover, 0)} at ${usd(args.strike)}, premium ${musd(args.premium)}${args.autoRepay ? ', auto-repay' : ''}`
-    case 'StrikeTriggered': return `BTC touched ${usd(args.strike)} (at ${usd(args.price)}): ${musd(args.cover, 0)} now owed`
+    case 'StrikeTriggered': return `BTC touched ${usd(args.strike)} (at ${usd(args.price)}): ${musd(args.cover, 0)} now owed, ${musd(args.reward)} to the caller`
     case 'PolicyPaid': return `Paid ${musd(args.cover, 0)} ${args.repaidTrove ? 'into a Mezo loan' : 'to a wallet'}`
     case 'Deposit': return `Underwriter deposited ${musd(args.assets, 0)}`
     case 'Withdraw': return `Underwriter withdrew ${musd(args.assets, 0)}`
@@ -532,6 +597,17 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
       const sig = await signRepay(p.cover, deadline)
       const hash = await write(PAYUNG, payungAbi, 'setAutoRepay', [p.id, true, deadline, sig])
       return { hash, text: `Auto-repay re-signed. A payout on this policy now goes into your loan.` }
+    })
+
+  // Anyone can call claim; doing it yourself means not waiting for a keeper.
+  const claim = (p) =>
+    run(`claim-${p.id}`, async () => {
+      const tryLoan = p.autoRepay && !p.problem
+      const [upper, lower] = tryLoan ? await repayHints(pub, p.holder, p.cover) : [ZERO, ZERO]
+      const hash = await write(PAYUNG, payungAbi, 'claim', [p.id, upper, lower])
+      // Report where the MUSD actually went (the contract falls back to the wallet if Mezo refuses the repay).
+      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: (await pub.getTransactionReceipt({ hash })).logs })
+      return { hash, text: `Paid ${musd(p.cover, 0)} ${paid?.args.repaidTrove ? 'into your loan' : 'to your wallet (Mezo did not accept the repay signature)'}.` }
     })
 
   return (
@@ -560,14 +636,19 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
                   <td>{musd(p.cover, 0)}</td>
                   <td>{date(p.expiry)}{p.live && !p.triggered && <small> · {left(p.expiry)} left</small>}</td>
                   <td>
-                    {!p.autoRepay ? 'Wallet' : !p.live ? 'Loan' : p.problem ? (
+                    {!p.autoRepay ? 'Wallet' : !p.live ? 'Loan' : p.problem === undefined ? 'Loan (checking the repay…)' : p.problem ? (
                       <>
                         <span className="warn-inline" title={p.problem}>Wallet (repay signature no longer valid)</span>{' '}
                         <button className="small" disabled={!canWrite || !!busy} onClick={() => rearm(p)}>{busy === `rearm-${p.id}` ? 'Signing…' : 'Re-sign'}</button>
                       </>
                     ) : <span title="Dry-run of Mezo's repay just succeeded">Loan, repay checked</span>}
                   </td>
-                  <td><span className={`pill ${status.split(',')[0].toLowerCase()}`}>{status}</span></td>
+                  <td>
+                    <span className={`pill ${status.split(',')[0].toLowerCase()}`}>{status}</span>
+                    {p.triggered && !p.claimed && (
+                      <> <button className="small" disabled={!canWrite || !!busy} onClick={() => claim(p)}>{busy === `claim-${p.id}` ? 'Paying…' : 'Pay out now'}</button></>
+                    )}
+                  </td>
                 </tr>
               )
             })}

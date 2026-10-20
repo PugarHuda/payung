@@ -50,6 +50,10 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant TABLE_SIZE = 26; // one entry per 1% from 5% to 30%
     // Leaves room for the repay so a keeper cannot starve it into the fallback path.
     uint256 public constant REPAY_GAS = 800_000;
+    // Mezo's oracle keeps no price history, so a touch counts only if someone calls `trigger`
+    // while BTC is below the strike. Paying the caller makes watching worth it for anyone.
+    uint256 public constant TRIGGER_REWARD_BPS = 10; // 0.1% of the touched cover
+    uint256 public constant MAX_TRIGGER_REWARD = 10e18;
     uint256 public constant VOL_REF = 0.5e18; // annualised vol the premium table was built for
     uint256 public constant VOL_FLOOR = 0.35e18; // calm markets never price cover below this vol
     uint256 public constant VOL_CAP = 2e18;
@@ -100,7 +104,9 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     event PolicyBought(
         uint256 indexed id, address indexed holder, uint256 expiry, uint256 strike, uint256 cover, uint256 premium, bool autoRepay
     );
-    event StrikeTriggered(uint256 indexed expiry, uint256 indexed strike, uint256 price, uint256 cover);
+    event StrikeTriggered(
+        uint256 indexed expiry, uint256 indexed strike, uint256 price, uint256 cover, address caller, uint256 reward
+    );
     event PolicyPaid(uint256 indexed id, address indexed holder, uint256 cover, bool repaidTrove);
     event PremiumTableUpdated(uint16[TABLE_SIZE] table);
     event MaxUtilizationUpdated(uint256 bps);
@@ -194,7 +200,8 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     /// @notice Permissionless: mark `strike` as touched once the Mezo price is at or below it.
-    function trigger(uint256 strike) external {
+    /// The caller earns 0.1% of the touched cover (max 10 MUSD) from the vault's free MUSD.
+    function trigger(uint256 strike) external nonReentrant returns (uint256 reward) {
         uint256 expiry = activeExpiry;
         require(block.timestamp < expiry, "Payung: epoch over");
         Strike storage s = strikes[expiry][strike];
@@ -206,7 +213,10 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         s.triggered = true;
         activeCover -= s.cover;
         totalOwed += s.cover;
-        emit StrikeTriggered(expiry, strike, price, s.cover);
+
+        reward = Math.min(triggerReward(s.cover), freeLiquidity());
+        if (reward > 0) IERC20(asset()).safeTransfer(msg.sender, reward);
+        emit StrikeTriggered(expiry, strike, price, s.cover, msg.sender, reward);
     }
 
     /// @notice Permissionless: pay a policy whose strike was touched. Keepers pass sorted-trove
@@ -262,9 +272,11 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         if (dt < OBSERVE_INTERVAL) return false;
         uint256 last = lastObservedPrice;
         if (last != 0 && dt <= OBSERVE_MAX_GAP) {
-            uint256 r = (price > last ? price - last : last - price) * 1e18 / last;
-            uint256 sample = Math.mulDiv(r * r / 1e18, 365 days, dt); // annualised variance of this step
-            uint256 w = dt * 1e18 / (dt + VOL_TAU);
+            uint256 move = price > last ? price - last : last - price;
+            // (move / last)^2 annualised, in wad, with a single rounding step
+            uint256 sample = Math.mulDiv(move * 365 days, move * 1e18, last * last * dt);
+            uint256 w = dt * 1e18 / (dt + VOL_TAU); // wad weight of this sample
+            // slither-disable-next-line divide-before-multiply (one rounding step on a wad weight)
             variance = (variance * (1e18 - w) + sample * w) / 1e18;
         }
         lastObservedPrice = uint128(price);
@@ -281,6 +293,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// and the NAV mark decays smoothly instead of jumping at expiry.
     function premiumRate(uint256 price, uint256 strike, uint256 remaining) public view returns (uint256) {
         if (price <= strike) return BPS;
+        // slither-disable-next-line incorrect-equality (expiry reached: nothing left to insure)
         if (remaining == 0) return 0;
         uint256 distance = (price - strike) * BPS / price;
         uint256 timeScale = Math.sqrt(EPOCH * 1e36 / Math.min(remaining, EPOCH)); // sqrt(week / remaining), wad
@@ -295,6 +308,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
             return BPS - (BPS - premiumTable[0]) * distanceBps / MIN_DISTANCE_BPS;
         }
         uint256 i = (distanceBps - MIN_DISTANCE_BPS) / 100;
+        // slither-disable-next-line weak-prng (interpolation remainder, not randomness)
         uint256 frac = (distanceBps - MIN_DISTANCE_BPS) % 100;
         uint256 a = premiumTable[i];
         uint256 b = premiumTable[i + 1];
@@ -350,6 +364,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     /// policy is marked at full cover (conservative for those staying in the vault).
     function openLiability() public view returns (uint256 liability) {
         if (block.timestamp >= activeExpiry) return 0;
+        // slither-disable-next-line uninitialized-local (set in the try branch)
         uint256 price;
         try priceFeed.fetchPrice() returns (uint256 p) {
             price = p;
@@ -361,8 +376,14 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         for (uint256 i; i < list.length; ++i) {
             Strike storage s = strikes[activeExpiry][list[i]];
             if (s.triggered) continue;
-            liability += Math.mulDiv(s.cover, premiumRate(price, list[i], remaining), BPS, Math.Rounding.Ceil);
+            liability += price <= list[i]
+                ? s.cover + triggerReward(s.cover) // touched, the trigger (and its reward) is a call away
+                : Math.mulDiv(s.cover, premiumRate(price, list[i], remaining), BPS, Math.Rounding.Ceil);
         }
+    }
+
+    function triggerReward(uint256 cover) public pure returns (uint256) {
+        return Math.min(cover * TRIGGER_REWARD_BPS / BPS, MAX_TRIGGER_REWARD);
     }
 
     /// @notice MUSD not reserved for payouts or open cover; the only part that can leave or back new cover.
@@ -391,6 +412,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
 
     /// @dev Deposits price shares off NAV, so they need a fresh oracle (stale NAV is conservative).
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        // slither-disable-next-line unused-return (called only to revert while the oracle is stale)
         priceFeed.fetchPrice();
         super._deposit(caller, receiver, assets, shares);
     }

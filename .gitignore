@@ -7,3 +7,4 @@ contracts/broadcast/*/31611/run-*.json
 dist/
 test-results/
 playwright-report/
+app/dist-fork/

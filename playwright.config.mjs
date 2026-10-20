@@ -10,9 +10,9 @@ export default defineConfig({
   workers: 1, // one wallet, one nonce sequence
   reporter: [['list']],
   use: {
-    baseURL: process.env.E2E_URL ?? 'http://localhost:4173/',
+    baseURL: process.env.E2E_URL ?? 'http://localhost:4783/',
     channel: process.env.E2E_CHANNEL ?? 'msedge', // Edge ships with Windows; CI uses chromium
     trace: 'retain-on-failure',
   },
-  webServer: process.env.E2E_URL ? undefined : { command: 'npm run build && npm run preview -w app -- --port 4173 --strictPort', url: 'http://localhost:4173/', timeout: 120_000 },
+  webServer: process.env.E2E_URL ? undefined : { command: 'npm run build && npm run preview -w app -- --port 4783 --strictPort', url: 'http://localhost:4783/', timeout: 120_000 },
 })

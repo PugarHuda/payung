@@ -36,3 +36,18 @@ jobs:
         run: npx playwright test -g "without a wallet"
         env:
           E2E_CHANNEL: chromium
+
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install slither-analyzer
+      - name: Static analysis (fails on any finding)
+        run: slither src/Payung.sol --config-file slither.config.json --fail-low
+        working-directory: contracts

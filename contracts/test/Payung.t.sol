@@ -207,7 +207,7 @@ contract PayungTest is Test {
     function test_navMarksLossBeforeTrigger() public {
         _buy(alice, 90_000e18, 10_000e18, false);
         feed.set(90_000e18); // touched but nobody triggered yet
-        assertApproxEqAbs(vault.openLiability(), 10_000e18, 1);
+        assertApproxEqAbs(vault.openLiability(), 10_010e18, 1); // cover + the 10 MUSD trigger reward
         // A new LP cannot buy shares that ignore the coming payout.
         vm.prank(lp2);
         uint256 shares = vault.deposit(10_000e18, lp2);
@@ -356,6 +356,19 @@ contract PayungTest is Test {
         vm.prank(alice);
         vm.expectRevert("Payung: already paid");
         vault.setAutoRepay(id, false, 0, "");
+    }
+
+    function test_triggerPaysTheCaller() public {
+        _buy(alice, 90_000e18, 1_000e18, false);
+        _buy(bob, 80_000e18, 40_000e18, false);
+        feed.set(79_000e18);
+        uint256 before = musd.balanceOf(bob);
+        vm.prank(bob);
+        assertEq(vault.trigger(90_000e18), 1e18); // 0.1% of 1,000
+        vm.prank(bob);
+        assertEq(vault.trigger(80_000e18), 10e18); // capped at 10 MUSD
+        assertEq(musd.balanceOf(bob) - before, 11e18);
+        assertGe(musd.balanceOf(address(vault)), vault.totalOwed());
     }
 
     function testFuzz_vaultAlwaysSolvent(uint256 strikeK, uint256 cover, uint256 dropBps) public {

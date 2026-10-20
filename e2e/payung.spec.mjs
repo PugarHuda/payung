@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
 import { parseUnits } from 'viem'
 import { installWallet } from './wallet.mjs'
 import { ADDR, mezoAbi, repayTypedData, repayHints, GAS } from '../shared/mezo.js'
@@ -34,6 +35,16 @@ test.describe('without a wallet', () => {
       await page.getByRole('button', { name: tab }).click()
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
       expect(overflow, `${tab} overflows`).toBeLessThanOrEqual(0)
+    }
+  })
+
+  test('has no WCAG A/AA violations on any tab (axe-core)', async ({ page }) => {
+    await page.goto('./')
+    await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
+    for (const tab of ['Protect my loan', 'Earn by underwriting', 'My cover']) {
+      await page.getByRole('button', { name: tab }).click()
+      const { violations } = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze()
+      expect(violations.map((v) => `${tab}: ${v.id} (${v.nodes.length}) ${v.help}`)).toEqual([])
     }
   })
 
@@ -94,11 +105,21 @@ test.describe('with a wallet on Mezo testnet', () => {
     await page.keyboard.press('End')
     await expect(page.locator('.big small')).toHaveText(/(5|6)\.\d% below now/)
     await page.keyboard.press('Home')
-    await expect(page.locator('.big small')).toHaveText(/(29|30)\.\d% below now/)
+    await expect(page.locator('.big small')).toHaveText(/(2[89]|30)\.\d% below now/) // ceil(70% of spot) to the $1,000 grid
     for (let i = 0; i < 10; i++) await page.keyboard.press('ArrowRight')
 
-    // Buy real cover with auto-repay.
-    await cover.fill('100')
+    // Underwrite first: the deposit adds backing capacity for the cover bought next.
+    await page.getByRole('button', { name: 'Earn by underwriting' }).click()
+    const amountBox = page.getByLabel('Amount (MUSD)')
+    await amountBox.fill('100')
+    await page.getByRole('button', { name: 'Deposit' }).click()
+    await expect(page.getByRole('status')).toContainText('Deposited 100 MUSD.', { timeout: 180_000 })
+    await page.getByRole('button', { name: 'Protect my loan' }).click()
+    await slider.focus()
+    for (let i = 0; i < 10; i++) await page.keyboard.press('ArrowRight')
+
+    // Buy real cover with auto-repay, sized to what the vault can still back this week.
+    await cover.fill('25')
     await expect(page.getByRole('checkbox')).toBeChecked()
     await expect(buy).toBeEnabled()
     await buy.click()
@@ -108,9 +129,9 @@ test.describe('with a wallet on Mezo testnet', () => {
     // My cover: the new policy is active and Mezo's repay dry-run passes.
     await page.getByRole('button', { name: 'My cover' }).click()
     const row = page.locator('tbody tr').first()
-    await expect(row).toContainText('100 MUSD')
+    await expect(row).toContainText('25 MUSD')
     await expect(row).toContainText('Active')
-    await expect(row).toContainText('Loan, repay checked')
+    await expect(row).toContainText('Loan, repay checked', { timeout: 120_000 })
     await expect(page.getByText(/Browser alerts are on/)).toBeVisible()
 
     // Another Mezo signature action (a signed 1 MUSD repay) uses up the nonce: the app spots it and re-signs.
@@ -129,12 +150,8 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.getByRole('status')).toContainText('Auto-repay re-signed', { timeout: 120_000 })
     await expect(row).toContainText('Loan, repay checked')
 
-    // Underwrite: deposit and withdraw 10 MUSD.
+    // Underwrite: withdraw 10 MUSD of free liquidity.
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
-    const amountBox = page.getByLabel('Amount (MUSD)')
-    await amountBox.fill('10')
-    await page.getByRole('button', { name: 'Deposit' }).click()
-    await expect(page.getByRole('status')).toContainText('Deposited 10 MUSD.', { timeout: 120_000 })
     await amountBox.fill('10')
     await page.getByRole('button', { name: 'Withdraw' }).click()
     await expect(page.getByRole('status')).toContainText('Withdrew 10 MUSD.', { timeout: 120_000 })

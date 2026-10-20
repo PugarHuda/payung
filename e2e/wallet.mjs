@@ -5,10 +5,10 @@ import { createPublicClient, createWalletClient, http, numberToHex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet } from '../shared/mezo.js'
 
-export async function installWallet(page, key) {
+export async function installWallet(page, key, rpc) {
   const account = privateKeyToAccount(key)
-  const pub = createPublicClient({ chain: mezoTestnet, transport: http() })
-  const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http() })
+  const pub = createPublicClient({ chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
+  const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
   const state = { chainId: 1, mezoAdded: false, requests: [] }
 
   await page.exposeFunction('__walletRpc', async (method, params = []) => {

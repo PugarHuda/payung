@@ -79,6 +79,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_TRIGGER_REWARD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_COVER",
     "inputs": [],
     "outputs": [
@@ -171,6 +184,19 @@
   {
     "type": "function",
     "name": "TABLE_SIZE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "TRIGGER_REWARD_BPS",
     "inputs": [],
     "outputs": [
       {
@@ -1302,8 +1328,33 @@
         "internalType": "uint256"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "reward",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "triggerReward",
+    "inputs": [
+      {
+        "name": "cover",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -1629,6 +1680,18 @@
       },
       {
         "name": "cover",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "reward",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"

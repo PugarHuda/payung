@@ -1,7 +1,8 @@
 // Payung keeper: triggers touched strikes, pays policies (into troves when pre-signed) and feeds
 // the on-chain volatility estimate. Every action is permissionless; anyone can run this. Usage:
-//   KEEPER_KEY=0x... PAYUNG=0x... node keeper.mjs [--once]
-// --once runs a single pass (the GitHub Actions cron in .github/workflows/keeper.yml).
+//   KEEPER_KEY=0x... PAYUNG=0x... node keeper.mjs [--once | --for <seconds>]
+// --once runs a single pass; --for keeps polling for that long and exits (the GitHub Actions
+// cron in .github/workflows/keeper.yml runs --for 270 every 5 minutes: near-continuous watch).
 import { createPublicClient, createWalletClient, http, formatUnits } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, GAS } from '../shared/mezo.js'
@@ -12,14 +13,14 @@ const pub = createPublicClient({ chain: mezoTestnet, transport: http() })
 const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http() })
 const read = (functionName, args = []) => pub.readContract({ address: payung, abi: payungAbi, functionName, args })
 const ZERO = '0x0000000000000000000000000000000000000000'
-const POLL_MS = 5_000 // a one-touch is only caught if someone looks while BTC is below the strike
+const POLL_MS = Number(process.env.POLL_MS ?? 5_000) // a touch counts only if someone looks while BTC is below the strike
 const OBSERVE_INTERVAL = 15n * 60n
 
 async function send(functionName, args) {
   const req = { account, address: payung, abi: payungAbi, functionName, args }
   await pub.simulateContract(req) // surface the revert reason instead of burning gas on it
   const hash = await wallet.writeContract({ ...req, gas: GAS })
-  const receipt = await pub.waitForTransactionReceipt({ hash })
+  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 60_000 })
   console.log(`${functionName}(${args.join(', ')}) -> ${receipt.status} ${mezoTestnet.blockExplorers.default.url}/tx/${hash}`)
 }
 
@@ -72,11 +73,18 @@ if (process.argv.includes('--once')) {
   process.exit(0)
 }
 
-for (;;) {
+const forIdx = process.argv.indexOf('--for')
+const stopAt = forIdx > 0 ? Date.now() + Number(process.argv[forIdx + 1]) * 1000 : Infinity
+let ticks = 0
+let failures = 0
+while (Date.now() < stopAt) {
+  ticks++
   try {
     await tick()
   } catch (e) {
+    failures++
     console.error(e.shortMessage ?? e.message) // stale oracle, RPC hiccup: retry next tick
   }
   await new Promise((r) => setTimeout(r, POLL_MS))
 }
+process.exit(failures * 2 > ticks ? 1 : 0) // mostly failing (e.g. RPC down) -> red cron run

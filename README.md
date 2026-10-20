@@ -16,13 +16,13 @@ Built for the [Mezo Buildathon](https://app.akindo.io/wave-hacks/OVOO0gdrVU8379D
 | | |
 |---|---|
 | App | https://pugarhuda.github.io/payung/ |
-| Payung vault | [`0xaDe0CA33Ed6b6616BE87E3623fDCe38C4dd84633`](https://explorer.test.mezo.org/address/0xaDe0CA33Ed6b6616BE87E3623fDCe38C4dd84633), Sourcify `exact_match` |
-| Underwriter deposit (1,500 MUSD) | [`0xea1a5d1a…a873`](https://explorer.test.mezo.org/tx/0xea1a5d1ad7787fbebdef0d5643e6bd6fce4446d09366acd59f22b60c7aeba873) |
-| Cover with pre-signed auto-repay (500 MUSD at $71,000, ~40 h left, premium 1.25 MUSD) | [`0x1c694e52…9201`](https://explorer.test.mezo.org/tx/0x1c694e52fc3b75eae684e9e8aabc79a4c91f5b0540f129f2266459a1115e9201) |
-| Cover bought through the app by the e2e test | [`0x115d38f0…d753`](https://explorer.test.mezo.org/tx/0x115d38f0a932df7dbaa73a7010a873ce4b17190d273ca424478dea813805d753) |
-| Auto-repay re-signed after a real Mezo nonce was used up | [`0xeb9d88d4…1e95`](https://explorer.test.mezo.org/tx/0xeb9d88d4132bfacdd36ba2ac62a01c383171b6aed4fafd6248f4bcdc3d611e95) |
-| Keeper | GitHub Actions every 5 minutes ([runs](https://github.com/PugarHuda/payung/actions/workflows/keeper.yml)), dedicated wallet `0x4FF8d702D8CC8c106BB1C7C6Bf56459DE4300d9D` |
-| Touch → trigger → repay into a real trove | Fork tests against the live MUSD contracts (see below); a real touch on testnet needs BTC to actually fall 5%+ |
+| Payung vault | [`0x7F9f315304450d5E78475223374545B8B9b873A0`](https://explorer.test.mezo.org/address/0x7F9f315304450d5E78475223374545B8B9b873A0), Sourcify `exact_match` |
+| Underwriter deposit (1,000 MUSD) | [`0x74e5516c…80e4`](https://explorer.test.mezo.org/tx/0x74e5516c281fd9141b8b6a1819e5c6a5d2cb2dde3ada9990af6f40b8b24380e4) |
+| Cover with pre-signed auto-repay (300 MUSD at $71,000, ~40 h left, premium 0.75 MUSD) | [`0x8d4499db…f97b`](https://explorer.test.mezo.org/tx/0x8d4499db70caa97f7c582b9f6903c6043c60754c7620f76dbea15749518af97b) |
+| Cover bought through the app by the e2e test | [`0x355d2ff5…6ea1`](https://explorer.test.mezo.org/tx/0x355d2ff5ad47dce79ff5d17272936d94316408523674e023071c1e6260556ea1) |
+| Auto-repay re-signed after a real Mezo nonce was used up | [`0x4c26800c…a9f0`](https://explorer.test.mezo.org/tx/0x4c26800cfb70f1b9ddb974046b5db530081083d794a23b7761721989314ea9f0) |
+| Keeper | GitHub Actions every 5 minutes, each run watching for 270 s at 10 s polls ([runs](https://github.com/PugarHuda/payung/actions/workflows/keeper.yml)), dedicated wallet `0x4FF8d702D8CC8c106BB1C7C6Bf56459DE4300d9D` |
+| Touch → trigger (reward) → repay into a real trove | Foundry fork tests, and a Playwright test that clicks through it in the app on an anvil fork of Mezo testnet (see Tests); a real touch on testnet needs BTC to actually fall 5%+ |
 
 ## How it works
 
@@ -30,7 +30,7 @@ Built for the [Mezo Buildathon](https://app.akindo.io/wave-hacks/OVOO0gdrVU8379D
 underwriters ──MUSD──▶ Payung vault (ERC-4626) ◀──premium── borrower
                           │  backs every policy, open cover ≤ 50% of the vault
    Mezo PriceFeed ──▶ poke()             permissionless: on-chain BTC volatility
-                  ──▶ trigger(strike)    permissionless, once price ≤ strike
+                  ──▶ trigger(strike)    permissionless, once price ≤ strike; caller earns 0.1%
                           │
                       claim(policy)      permissionless (keeper)
                           ├─ repayMUSDWithSignature(cover, borrower, sig) ──▶ borrower's trove
@@ -40,8 +40,8 @@ underwriters ──MUSD──▶ Payung vault (ERC-4626) ◀──premium── 
 1. **Buy.** `buy(strike, cover, maxPremium, autoRepay, sigDeadline, signature)`. Strikes sit on a $1,000 grid, 5% to 30% below spot. With `autoRepay`, the borrower signs Mezo's `RepayMUSD(amount, borrower, nonce, deadline)` once in the app. `maxPremium` protects the buyer if BTC moves between quote and execution.
 2. **Price.** A one-touch probability depends on distance / (volatility × √time). Payung rescales the strike distance by `(50% / vol) × √(week / time left)` and reads a one-week, 50%-vol table (1.25× margin). So cover gets cheaper as the week runs out, and dearer when BTC is volatile.
 3. **Volatility from Mezo itself.** `poke()` samples Mezo's PriceFeed (every 15 minutes or more; buys and triggers sample too) into an EWMA of annualised variance with a one-day time constant, clamped to 35–200%. Gaps over a day restart sampling instead of producing one huge sample. No external vol oracle and no owner input.
-4. **Touch.** Anyone calls `trigger(strike)` when `PriceFeed.fetchPrice() <= strike` before expiry. One-touch, not European: cover pays when the danger happens, not on Thursday.
-5. **Pay.** Anyone calls `claim(id, hints)`. Mezo verifies the borrower's signature and burns the vault's MUSD against the trove debt. If the repay would fail, the MUSD goes to the borrower's wallet instead. That happens when the signature was voided, the trove is closed, or the repay would break the 1,800 MUSD minimum debt.
+4. **Touch.** Anyone calls `trigger(strike)` when `PriceFeed.fetchPrice() <= strike` before expiry, and earns 0.1% of the touched cover (max 10 MUSD). Mezo's oracle keeps no price history (`getRoundData` is not supported), so a touch only counts if someone is watching. The reward pays outside bots to watch, and the app shows a **Trigger it and earn** button to any visitor while a strike is touched. One-touch, not European: cover pays when the danger happens, not on Thursday.
+5. **Pay.** Anyone calls `claim(id, hints)`; holders have a **Pay out now** button, so nobody has to wait for a keeper. Mezo verifies the borrower's signature and burns the vault's MUSD against the trove debt. If the repay would fail, the MUSD goes to the borrower's wallet instead. That happens when the signature was voided, the trove is closed, or the repay would break the 1,800 MUSD minimum debt.
 6. **Re-arm.** Mezo uses one nonce per borrower for every signed action, so a later signed Mezo action voids the payout signature. The app dry-runs the repay as the vault on every refresh. If it would fail, a **Re-sign** button calls `setAutoRepay` with a fresh signature.
 7. **Expire.** Untriggered cover lapses at Thursday 00:00 UTC. The NAV mark of open cover decays with time left, so premiums flow to underwriters smoothly through the week instead of jumping at expiry.
 
@@ -58,7 +58,7 @@ underwriters ──MUSD──▶ Payung vault (ERC-4626) ◀──premium── 
 ## Security model
 
 - **Fully collateralised, capped exposure.** `buy` reverts unless the cover fits `coverCapacity()`: open cover may lock at most `maxUtilization` (50%) of the vault's MUSD net of what is owed. That is the most underwriters can lose in one week. Untriggered cover is locked until expiry; triggered cover is reserved until paid (`totalOwed`).
-- **NAV marks open risk.** `totalAssets = balance − owed − Σ cover × premiumRate(price, strike, time left)`, using the same function that priced the premium. Buying cover is NAV-neutral, so new depositors cannot scoop premiums and leavers cannot dodge a coming payout. The mark decays with time, so there is no expiry jump to snipe. A stale oracle marks open cover at 100% and blocks deposits.
+- **NAV marks open risk.** `totalAssets = balance − owed − Σ cover × premiumRate(price, strike, time left)` (a touched strike counts in full, including its trigger reward), using the same function that priced the premium. Buying cover is NAV-neutral, so new depositors cannot scoop premiums and leavers cannot dodge a coming payout. The mark decays with time, so there is no expiry jump to snipe. A stale oracle marks open cover at 100% and blocks deposits.
 - **Withdrawals** are capped at free liquidity. Pausing stops new sales only; it never blocks exits, triggers or claims.
 - **Buyer protection:** `maxPremium` slippage bound; the app simulates every transaction before sending it and explains reverts in plain words.
 - **No meta-transactions, no owner powers over funds.** The owner can only update the premium table (bounded, non-increasing), set the utilization cap (≤100%) and pause sales. Volatility comes from Mezo's feed, not from the owner. The Oct 5 veBTC exploit came through a trusted-forwarder path; Payung has none.
@@ -69,10 +69,19 @@ underwriters ──MUSD──▶ Payung vault (ERC-4626) ◀──premium── 
 ## Tests
 
 ```bash
-npm run test:contracts    # 24 unit + fuzz tests (Foundry)
+npm run test:contracts    # 25 unit + fuzz tests, 5 invariants over 128,000 random calls (Foundry)
 npm run test:fork         # 2 fork tests: the real MUSD system on Mezo testnet
-E2E_KEY=0x... npm run test:e2e   # Playwright, real wallet bridge, real testnet transactions
+E2E_KEY=0x... npm run test:e2e   # Playwright: real wallet bridge, real testnet transactions, anvil-fork touch
+cd contracts && slither src/Payung.sol --config-file slither.config.json   # static analysis: 0 findings
 ```
+
+- **Invariant tests** (`PayungInvariant.t.sol`) drive the vault through random sequences of deposits, withdrawals, buys (with and without auto-repay), price moves, triggers, claims (repay accepted or refused), vol samples and time jumps. `fail_on_revert` is on, and a valid buy that reverts fails the run. After each sequence:
+  - MUSD always covers what is owed;
+  - live open cover is fully backed on top of that;
+  - NAV never counts owed or at-risk MUSD;
+  - `totalOwed` equals the unpaid touched policies, recomputed from scratch;
+  - volatility stays inside its clamp.
+- **Slither** runs in CI. The few warnings left are reviewed and annotated inline: interpolation modulo, the oracle freshness call, and the expiry guard. One real finding was fixed: the vol sample now rounds once instead of twice.
 
 - **Unit and fuzz tests** cover pricing:
   - table values, time decay and NAV accrual through the week
@@ -86,9 +95,16 @@ E2E_KEY=0x... npm run test:e2e   # Playwright, real wallet bridge, real testnet 
   - **Flow with a wallet.** The suite connects, recovers from a mid-session network change, and rejects bad input (letters, `1.2.3`, under 10 MUSD, more than the vault can back). It drives the strike slider to both ends of the 5–30% band and buys real cover with auto-repay.
   - **Re-arm on a real nonce.** It then sends a real signed 1 MUSD repay to Mezo, which uses up the nonce. The test checks that the app flags the policy and re-signs it.
   - **Underwriting and account switch.** It deposits and withdraws, and handles a wallet account switch.
-  - **Read-only checks** (run in CI): no-wallet state, phone width without sideways scroll, keyboard focus, and no page errors.
+  - **A real touch, through the UI** (`e2e/touch.spec.mjs`). It runs an anvil fork of Mezo testnet holding the deployed vault and the real MUSD system, and swaps only `PriceFeed`'s code for one that returns a set price, because anvil can't run Mezo's oracle precompile. The test sets BTC $500 under the policy's strike. It re-signs auto-repay if a past Mezo action used up the nonce. Then it clicks **Trigger it and earn** and checks the caller received exactly the reward. Finally it clicks **Pay out now** and checks the trove's debt fell by the cover.
+  - **Read-only checks** (run in CI): no-wallet state, phone width without sideways scroll, keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
 
-CI ([`.github/workflows/test.yml`](.github/workflows/test.yml)) runs unit, fuzz and fork tests, lint and the read-only e2e suite on every push.
+CI ([`.github/workflows/test.yml`](.github/workflows/test.yml)) runs unit, fuzz, invariant and fork tests, Slither, lint and the read-only e2e suite on every push.
+
+The tests found and fixed real bugs:
+- Refreshes stacked up on a slow RPC, and one transaction could leave the UI stuck on "Withdrawing…".
+- A payout that fell back to the wallet was reported as "into your loan". The message now comes from the `PolicyPaid` event.
+- The raw viem error showed for a wallet out of gas money.
+- Secondary text failed the WCAG contrast minimum.
 
 ## Run it
 
@@ -109,12 +125,14 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 - **Loan-aware defaults.** A recovery-mode-aware liquidation line and a suggested strike and cover from your trove.
 - **Live pricing.** A premium quote that falls as the week runs out. It shows the on-chain volatility and the 1% slippage bound.
 - **Underwriter view.** Vault value, utilization, premiums this week and free liquidity. Vault activity is decoded from the Mezo explorer's (Blockscout) log API.
-- **My cover.** Per-policy auto-repay health from a dry-run of Mezo's repay, with a one-click re-sign.
+- **My cover.** Per-policy auto-repay health from a dry-run of Mezo's repay, with a one-click re-sign and **Pay out now** for touched cover.
+- **Anyone can keep.** Touched strikes show a **Trigger it and earn** button with the reward. The underwriter view shows when the price was last sampled, so a stalled keeper is visible.
+- **Payout preview.** The Protect tab shows your collateral ratio at the strike, before and after the payout.
 - **Browser alerts.** A notification when BTC is within 3% of your strike and when cover pays out.
 
 ## Known limits
 
-- **Touch detection** depends on someone calling `trigger` while BTC is under the strike. The hosted keeper looks every 5 minutes (a GitHub Actions limit), while `npm run keeper` polls every 5 seconds. Mezo's oracle exposes only the current price, so a dip shorter than the polling gap can be missed. Anyone can run a keeper.
+- **Touch detection** depends on someone calling `trigger` while BTC is under the strike. Mezo's oracle exposes only the latest round, and the Pyth contract on Mezo testnet holds a months-old BTC price whose Hermes history API now needs a key, so a past dip can't be proven on-chain. The hosted keeper polls every 10 s inside runs that GitHub starts every 5 minutes (GitHub may delay them), and `npm run keeper` polls every 5 s. The trigger reward exists so outside bots watch too.
 - **Premium table** shape is fixed (one week, 50% vol); vol and time enter through the distance rescaling. The owner can refresh the table.
 - **Mezo testnet quirks** we hit:
   - `eth_estimateGas` undershoots calls that touch the oracle precompile, so we send a fixed 3M gas limit (gas costs ~150 wei).
