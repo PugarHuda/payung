@@ -106,9 +106,13 @@ test.describe('without a wallet', () => {
     await page.goto('about:blank')
     await page.setContent(`<iframe src="${baseURL}" width="800" height="600"></iframe>`)
     await page.waitForTimeout(3000)
+    // Each engine shows a blocked frame its own way (Chromium: chrome-error:, Firefox: no URL, WebKit:
+    // the URL with an empty document); in none may the app render.
     const frame = page.frames().find((f) => f !== page.mainFrame())
-    expect(frame.url()).toMatch(/^chrome-error:/) // Chromium's blocked-frame page, not the app
-    expect(await frame.getByText('Open an umbrella').count()).toBe(0)
+    // (Firefox never answers inside its blocked frame, hence the time limit.)
+    const framed = await Promise.race([frame.evaluate(() => document.body?.innerText ?? '').catch(() => ''), new Promise((r) => setTimeout(() => r(''), 5000))])
+    expect(framed).not.toContain('Open an umbrella')
+    if (frame.url().startsWith(baseURL)) expect(framed.trim()).toBe('') // WebKit: the URL, but nothing rendered
   })
 
   test('says so when Mezo RPC or explorer is down, and recovers', async ({ page }) => {
