@@ -2,7 +2,7 @@
 // the on-chain volatility estimate. Every action is permissionless; anyone can run this. Usage:
 //   KEEPER_KEY=0x... [PAYUNG=0x...] [MEZO_RPC=http://...] node keeper.mjs [--once | --for <seconds>]
 // --once runs a single pass; --for keeps polling for that long and exits (the GitHub Actions
-// cron in .github/workflows/keeper.yml runs --for 270 every 5 minutes: near-continuous watch).
+// workflow in .github/workflows/keeper.yml runs --for 20700 back to back: a continuous watch).
 import { createPublicClient, createWalletClient, http, formatUnits, parseEventLogs } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, waitForReceipt, GAS } from '../shared/mezo.js'

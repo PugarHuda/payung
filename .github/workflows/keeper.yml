@@ -1,8 +1,10 @@
 name: Keeper
 
-# Scheduled every 5 minutes (GitHub starts scheduled runs best-effort). Each run watches for
-# 270 s, polling every 10 s: trigger touched strikes (earning the trigger reward), pay policies,
-# sample volatility. Uses a dedicated low-balance testnet key (secret KEEPER_KEY); anyone can run
+# GitHub starts scheduled runs best-effort: the */5 cron really fires every 1-3 hours. So each run
+# watches for nearly the 6-hour job limit, polling every 10 s (trigger touched strikes, earning the
+# trigger reward; pay policies; sample volatility; phone alerts), and the concurrency group keeps
+# one scheduled run queued behind it, which starts the moment it ends: a continuous watch. Public
+# repo, so the minutes are free. Uses a dedicated low-balance testnet key (secret KEEPER_KEY); anyone can run
 # the same keeper.
 on:
   schedule:
@@ -16,7 +18,7 @@ concurrency:
 jobs:
   keep:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,7 +26,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci -w keeper
-      - run: node keeper/keeper.mjs --for 270
+      - run: node keeper/keeper.mjs --for 20700
         env:
           KEEPER_KEY: ${{ secrets.KEEPER_KEY }}
           POLL_MS: 10000
