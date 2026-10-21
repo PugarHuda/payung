@@ -134,6 +134,27 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.facts div', { hasText: 'Premiums on open cover' }).locator('dd')).toHaveText('explorer offline', { timeout: 30_000 })
   })
 
+  test('?address= shows a real wallet\'s loan, cover and alerts read-only', async ({ page }) => {
+    const holder = '0xe42F6c4b72577CE2A64D583CF2f33a2D729c9C81' // the e2e wallet: a Mezo loan and real policies
+    await page.goto(`./?address=${holder}`)
+    await expect(page.getByRole('status').first()).toContainText('Viewing 0xe42F…9C81 read-only')
+    await expect(page.locator('.facts div', { hasText: 'Your loan' }).locator('dd')).toHaveText(/MUSD/)
+    await expect(page.getByRole('button', { name: 'Connect wallet to buy cover' })).toBeVisible()
+    await page.getByRole('button', { name: 'My cover' }).click()
+    const rows = page.locator('main.policies tbody tr')
+    await expect(rows.first()).toBeVisible()
+    for (const pill of await page.locator('main.policies tbody .pill').allInnerTexts()) expect(['Active', 'Paid', 'Expired', 'Touched, paying out']).toContain(pill)
+    // Nothing can be signed or sent from a view.
+    for (const b of await page.getByRole('button', { name: /Pay out now|Re-sign|Send a test alert/ }).all()) await expect(b).toBeDisabled()
+    await expect(page.locator('.phone code')).toHaveText(`payung-${holder.toLowerCase().slice(2)}`)
+    const ics = page.locator('a[download$=".ics"]').first()
+    if (await ics.count()) expect(decodeURIComponent(await ics.getAttribute('href'))).toMatch(/BEGIN:VEVENT[\s\S]*DTSTART:\d{8}T\d{6}Z[\s\S]*END:VCALENDAR/)
+    // Junk in the parameter is ignored: no view, the normal connect button.
+    await page.goto('./?address=0x123')
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
+    await expect(page.getByText('read-only')).toHaveCount(0)
+  })
+
   test('a cover amount typed before the vault loads is kept', async ({ page }) => {
     let release
     const gate = new Promise((r) => (release = r))

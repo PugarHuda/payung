@@ -71,6 +71,10 @@ function linkPrefill() {
   const expiry = /^\d+$/.test(q.get('expiry') ?? '') ? BigInt(q.get('expiry')) : undefined
   return { strike, cover, expiry }
 }
+// ?address=0x… shows any wallet's loan, cover and alerts read-only, with no wallet connected
+// (for an advisor, a teammate, or a judge looking at real policies). Nothing can be signed in it.
+const watchParam = new URLSearchParams(location.search).get('address')
+const WATCH = watchParam && isAddress(watchParam) ? watchParam : undefined
 const renewLink = (p) => `${location.origin}${location.pathname}?strike=${p.strike / WAD}&cover=${formatUnits(p.cover, 18)}&expiry=${p.expiry + WEEK}`
 const txLink = (hash) => <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer">View transaction</a>
 
@@ -125,7 +129,7 @@ export default function App() {
   const wallets = useWallets()
   const [provider, setProvider] = useState()
   const [picking, setPicking] = useState(false)
-  const [account, setAccount] = useState()
+  const [account, setAccount] = useState(WATCH)
   const [chainId, setChainId] = useState()
   const [tab, setTab] = useState('protect')
   const [chain, setChain] = useState({})
@@ -142,7 +146,8 @@ export default function App() {
   const alerted = useRef(new Set())
 
   const wallet = useMemo(() => (provider ? createWalletClient({ chain: mezoTestnet, transport: custom(provider) }) : null), [provider])
-  const wrongChain = !!account && chainId !== mezoTestnet.id
+  const watching = !!account && !provider
+  const wrongChain = !!provider && !!account && chainId !== mezoTestnet.id
   const readP = useCallback((functionName, args = []) => pub.readContract({ address: PAYUNG, abi: payungAbi, functionName, args }), [])
   const readM = useCallback((address, functionName, args = []) => pub.readContract({ address, abi: mezoAbi, functionName, args }), [])
 
@@ -329,7 +334,7 @@ export default function App() {
     return wallet.signTypedData({ account, ...repayTypedData({ amount, borrower: account, nonce, deadline }) })
   }
 
-  const ctx = { chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite: !!account && !wrongChain }
+  const ctx = { chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite: !!provider && !!account && !wrongChain, watching }
 
   return (
     <div className="shell">
@@ -342,7 +347,7 @@ export default function App() {
             <button key={k} className={tab === k ? 'tab on' : 'tab'} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>{label}</button>
           ))}
         </nav>
-        {account ? <span className="acct" title={account}>{account.slice(0, 6)}…{account.slice(-4)}</span> : <button className="primary" onClick={connect}>Connect wallet</button>}
+        {account && !watching ? <span className="acct" title={account}>{account.slice(0, 6)}…{account.slice(-4)}</span> : <button className="primary" onClick={connect}>Connect wallet</button>}
       </header>
 
       {picking && (
@@ -356,6 +361,7 @@ export default function App() {
           <button className="tab" onClick={() => setPicking(false)}>Cancel</button>
         </div>
       )}
+      {watching && <p className="banner info" role="status">Viewing {account.slice(0, 6)}…{account.slice(-4)} read-only. Connect a wallet to buy, deposit or pay out.</p>}
       {PAYUNG !== ADDR.payung && <p className="banner error">Dev override: using vault {PAYUNG}, not the published Payung vault.</p>}
       {wrongChain && (
         <p className="banner error">
@@ -382,7 +388,7 @@ export default function App() {
   )
 }
 
-function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite, prefill, btc }) {
+function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite, watching, prefill, btc }) {
   const { price, capacity, vol, tcr } = chain
   const [weeks, setWeeks] = useState(1)
   const [moved, setMoved] = useState() // a renewal's old strike, when today's band no longer allows it
@@ -561,7 +567,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         {cantPay && <em className="warn">You have {musd(me.bal)}. Borrow or buy MUSD on Mezo to pay the premium.</em>}
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
-        {account ? (
+        {account && !watching ? (
           <button className="primary wide" disabled={!canWrite || !quote || tooBig || touched || noRoom || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
             {busy === 'buy' ? 'Opening umbrella…' : `Buy cover for ${quote ? musd(quote.premium) : '…'}`}
           </button>
@@ -760,7 +766,7 @@ function describe({ eventName, args }) {
   }
 }
 
-function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, alerts, enableAlerts, renew, signer }) {
+function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, watching, alerts, enableAlerts, renew, signer }) {
   const [phone, setPhone] = useState() // alerts on this account's ntfy topic, each with who signed it
   const loadPhone = useCallback(() => account && readAlerts(account).then(setPhone, () => setPhone(null)), [account])
   useEffect(() => {
@@ -823,7 +829,7 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
               const mine = a.signer?.toLowerCase() === account.toLowerCase()
               return (
                 <li key={a.id}>
-                  <span className={keeper || mine ? 'pill active' : 'pill expired'}>{mine ? 'Signed by you' : keeper ? 'Signed by the Payung keeper' : 'Not from Payung, ignore it'}</span>{' '}
+                  <span className={keeper || mine ? 'pill active' : 'pill expired'}>{mine ? (watching ? 'Signed by this wallet' : 'Signed by you') : keeper ? 'Signed by the Payung keeper' : 'Not from Payung, ignore it'}</span>{' '}
                   {a.title} <small>{ago(BigInt(a.time))}</small>
                 </li>
               )
