@@ -235,8 +235,9 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     await page.goto('./')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.locator('.acct')).toContainText(w.account.address.slice(0, 6))
-    expect(w.state.requests).toContain('wallet_addEthereumChain') // starts on Ethereum without Mezo
-    expect(w.state.chainId).toBe(31611)
+    // Starts on Ethereum without Mezo: the account shows first, then the switch fails (4902) and Mezo is added.
+    await expect.poll(() => w.state.requests).toContain('wallet_addEthereumChain')
+    await expect.poll(() => w.state.chainId).toBe(31611)
     await expect(page.getByText('This wallet has no Mezo loan.')).toBeVisible()
     await expect(page.getByRole('button', { name: /^Buy cover/ })).toBeDisabled() // no MUSD (or the vault is booked)
 
