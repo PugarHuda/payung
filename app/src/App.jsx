@@ -459,7 +459,8 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
     if (s > maxStrike) s = maxStrike
     setStrike(s)
     if (prefill?.strike && s !== prefill.strike) setMoved(prefill.strike)
-    const w = prefill?.expiry ? Number((prefill.expiry - chain.expiry) / WEEK) + 1 : 1
+    // On the week's last day, this week's cover would last hours: start from two weeks instead.
+    const w = prefill?.expiry ? Number((prefill.expiry - chain.expiry) / WEEK) + 1 : Number(chain.expiry) - Date.now() / 1000 < 86400 ? 2 : 1
     if (w >= 1 && w <= MAX_WEEKS) setWeeks(w)
     if (prefill?.cover) setCover(prefill.cover)
     else if (me.hasTrove) {
@@ -484,6 +485,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   // Until the quote for the inputs on screen arrives, there is none (no buying on an older one).
   const quote = lastQuote && lastQuote.expiry === expiry && lastQuote.strike === strike && lastQuote.cover === coverWei ? lastQuote : undefined
   const tooBig = capacity != null && coverWei > capacity
+  const expiring = (chain.strikes ?? []).filter((s) => s.expiry === chain.expiry && !s.triggered).reduce((sum, s) => sum + s.cover, 0n)
   // The contract refuses a strike BTC already touched this period, and a 33rd new strike in one period.
   const sold = chain.strikes?.find((s) => s.expiry === expiry && s.strike === strike)
   const touched = !!sold?.triggered
@@ -594,7 +596,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <input inputMode="decimal" value={cover} aria-invalid={!!coverError || tooBig} onChange={(e) => setCover(e.target.value.replace(/[^0-9.]/g, ''))} />
           {coverError && <em className="warn">{coverError}</em>}
           {tooBig && (capacity < MIN_COVER
-            ? <em className="warn">The vault's cover is fully booked. Capacity grows when underwriters deposit or when cover expires (next on {date(chain.expiry)}).</em>
+            ? <em className="warn">The vault's cover is fully booked. Capacity grows when underwriters deposit or when cover expires: {musd(expiring, 0)} of it on {date(chain.expiry)}.</em>
             : <em className="warn">The vault can back {musd(capacity, 0)} more right now. Lower the cover.</em>)}
         </label>
 
@@ -845,6 +847,8 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
   }, [loadPhone])
   if (!account) return <main><button className="primary" onClick={connect}>Connect wallet to see your cover</button></main>
   const list = me.policies ?? []
+  // Every armed signature carries the same Mezo nonce: only one of them can be used.
+  const armed = list.filter((p) => p.live && !p.triggered && p.autoRepay && p.problem === null)
 
   const rearm = (p) =>
     run(`rearm-${p.id}`, async () => {
@@ -946,6 +950,11 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
           </tbody>
         </table>
       )}
+      {armed.length > 1 && (
+        <p className="fine shared-nonce">
+          Mezo gives each borrower one signature counter, so your {armed.length} armed policies share one repay signature slot. The first to pay out goes into your loan and uses it up; the others would then pay your wallet until you re-sign them here.
+        </p>
+      )}
     </main>
   )
 }
@@ -989,7 +998,7 @@ function Odds({ btc, price, strike, liq, vol, expiry }) {
         <polyline points={btc.map((h) => `${x(h.t).toFixed(1)},${y(h.p).toFixed(1)}`).join(' ')} />
       </svg>
       <figcaption>
-        Chance BTC touches {usd(strike)} in the {left(expiry)} left: about <strong>{pctOf(model)}</strong> at the on-chain volatility.
+        Chance BTC touches {usd(strike)} in the {left(expiry)} left: {model < 0.001 ? '' : 'about '}<strong>{pctOf(model)}</strong> at the on-chain volatility.
         {windows > 0 && <> Over the last 30 days on Mezo's oracle, BTC fell {(drop * 100).toFixed(1)}% or more within {left(expiry)} in {hits} of {windows} overlapping stretches{separate < 4 ? ` (30 days hold only ${separate || 'under one'} separate stretch${separate === 1 ? '' : 'es'} this long, so read it loosely)` : ''}.</>}
         {' '}30-day low: {usd(BigInt(Math.round(low.p)) * WAD)} on {date(low.t)}. Gold line: your strike{liq ? '; red: liquidation' : ''}.
       </figcaption>
@@ -1017,8 +1026,8 @@ function SharePrice({ history }) {
       </svg>
       <figcaption>
         1 pyMUSD: {first.p.toFixed(4)} → {last.p.toFixed(4)} MUSD since launch on {date(first.t)} ({fmt(change)}
-        {/* ponytail: annualising a few hours of premiums would print a silly number */}
-        {days >= 1 ? `, ${fmt((1 + change) ** (365 / days) - 1)} a year at this pace` : ''}). Read from the vault at {history.length} past blocks.
+        {/* Compounding a day of premiums over a year printed +191,698,721,092%: wait for a full week and don't compound. */}
+        {days >= 7 ? `, ${fmt((change * 365) / days)} a year at this pace, not compounded` : ''}). Read from the vault at {history.length} past blocks.
       </figcaption>
     </figure>
   )

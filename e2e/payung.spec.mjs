@@ -43,6 +43,7 @@ test.describe('without a wallet', () => {
     await page.getByRole('button', { name: /Show older/ }).click()
     expect(await page.locator('.activity li').count()).toBeGreaterThan(shown)
     await expect(page.locator('.history figcaption')).toContainText(/1 pyMUSD: 1\.0000 → \d\.\d{4} MUSD since launch.*at 25 past blocks/)
+    await expect(page.locator('.history figcaption')).not.toContainText(/\d{4,}(\.\d+)?% a year/) // no year-long extrapolation of a day
     expect(errors).toEqual([])
   })
 
@@ -56,7 +57,8 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.seg label.on')).toHaveText('2 weeks')
     await page.goto('./?strike=abc&cover=1e9&expiry=-1')
     await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
-    await expect(page.locator('.seg label.on')).toHaveText('This week')
+    // The default period: this week, or two weeks once this week's cover would last under a day.
+    await expect(page.locator('.seg label.on')).toHaveText(next - week - Date.now() / 1000 < 86400 ? '2 weeks' : 'This week')
     await expect(page.getByLabel('Cover amount (MUSD)')).not.toHaveValue('1e9')
     await expect(page.locator('em.hint')).toHaveCount(0)
   })
