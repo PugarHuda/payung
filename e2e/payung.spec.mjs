@@ -141,6 +141,8 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.facts div', { hasText: 'Your loan' }).locator('dd')).toHaveText(/MUSD/)
     // Its place in Mezo's redemption queue, from one deployless eth_call over every sorted trove.
     await expect(page.locator('.facts div', { hasText: 'Redemption queue' }).locator('dd')).toHaveText(/^\d[\d,]* of \d[\d,]* \([\d,]+ MUSD of debt is redeemed first\)$/)
+    // Weighed against every redemption Mezo has processed (explorer), not a guess.
+    await expect(page.locator('.redemptions')).toHaveText(/^Mezo has processed \d+ redemptions since \w{3} \d{4}, the largest [\d,]+ MUSD, the latest on .+ UTC\. Against today's queue, \d+ of them would have reached your loan\.$/)
     await expect(page.getByRole('button', { name: 'Connect wallet to buy cover' })).toBeVisible()
     await page.getByRole('button', { name: 'My cover' }).click()
     const rows = page.locator('main.policies tbody tr')
@@ -156,6 +158,9 @@ test.describe('without a wallet', () => {
     await page.goto(`./?address=${lowest}`)
     await expect(page.locator('.facts div', { hasText: 'Redemption queue' }).locator('dd')).toHaveText(/^1 of [\d,]+ \(0 MUSD/)
     await expect(page.getByText("near the front of Mezo's redemption queue")).toBeVisible()
+    await expect(page.locator('.redemptions')).toBeVisible()
+    const all = (await page.locator('.redemptions').innerText()).match(/processed (\d+) redemptions/)[1]
+    await expect(page.locator('.redemptions')).toContainText(`${all} of them would have reached your loan`) // first in line: every one
     // Junk in the parameter is ignored: no view, the normal connect button.
     await page.goto('./?address=0x123')
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()

@@ -5,7 +5,7 @@
 // workflow in .github/workflows/keeper.yml runs --for 20700 back to back: a continuous watch).
 import { createPublicClient, createWalletClient, http, formatUnits, parseEventLogs } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, waitForReceipt, GAS } from '../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, redemptionQueue, redemptionHistory, waitForReceipt, GAS } from '../shared/mezo.js'
 import { notify, readAlerts } from '../shared/notify.js'
 
 const payung = process.env.PAYUNG ?? ADDR.payung
@@ -46,6 +46,25 @@ async function send(functionName, args) {
 
 let scanFrom = 0n // policies below this index are already paid
 let lastLog = 0
+let lastQueueCheck = 0
+const QUEUE_CHECK_MS = 10 * 60_000 // the queue moves with loans, not with every price tick
+
+// Payung covers liquidation, not redemption, so tell a covered borrower when one redemption the
+// size of the largest Mezo has processed would reach their loan (at most once a day per loan).
+async function watchRedemptions(holders) {
+  const history = await redemptionHistory()
+  const largest = history.reduce((m, r) => (r.amount > m ? r.amount : m), 0n)
+  for (const holder of holders) {
+    const q = await redemptionQueue(pub, holder)
+    if (q.ahead === q.total || q.debtAhead >= largest) continue // no loan, or out of reach
+    await alert(holder, {
+      tag: `redeem-${holder.toLowerCase()}-${new Date().toISOString().slice(0, 10)}`,
+      priority: 4,
+      title: `Your Mezo loan is ${(q.ahead + 1n).toLocaleString('en-US')} of ${q.total.toLocaleString('en-US')} in the redemption queue`,
+      message: `Only ${Math.round(Number(formatUnits(q.debtAhead, 18))).toLocaleString('en-US')} MUSD of debt is ahead of it; Mezo's largest redemption was ${Math.round(Number(formatUnits(largest, 18))).toLocaleString('en-US')} MUSD. A redemption repays your debt with your BTC. Payung does not cover it; a higher collateral ratio moves you back.`,
+    })
+  }
+}
 
 async function tick() {
   const [price, first, weeks] = await Promise.all([
@@ -97,6 +116,13 @@ async function tick() {
     }
   }
   scanFrom = allPaidBelow
+
+  if (Date.now() - lastQueueCheck > QUEUE_CHECK_MS) {
+    lastQueueCheck = Date.now()
+    const now = BigInt(Math.floor(Date.now() / 1000))
+    const covered = new Set(policies.filter((p) => !p.claimed && now < p.expiry).map((p) => p.holder))
+    await watchRedemptions(covered).catch((e) => console.error(`redemption watch failed: ${e.message}`))
+  }
 
   // Read these last: trigger() above also takes a sample. Chain time, not this machine's clock,
   // because poke() checks block.timestamp.

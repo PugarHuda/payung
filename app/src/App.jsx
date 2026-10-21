@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, parseEventLogs } from 'viem'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, redemptionQueue, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, redemptionQueue, redemptionHistory, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
 import { touchChance, touchRate } from '../../shared/odds.js'
 import { NTFY, KEEPERS, notify, readAlerts, topicFor } from '../../shared/notify.js'
 import './App.css'
@@ -403,6 +403,14 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   const [cover, setCover] = useState('')
   const [wantRepay, setAutoRepay] = useState(true)
   const [lastQuote, setQuote] = useState()
+  const [redemptions, setRedemptions] = useState() // Mezo's whole redemption history; null if the explorer is down
+
+  useEffect(() => {
+    if (me.hasTrove) redemptionHistory().then(setRedemptions, () => setRedemptions(null))
+  }, [me.hasTrove])
+  const q = me.hasTrove && me.queue && me.queue.ahead < me.queue.total ? me.queue : null
+  const largest = redemptions?.reduce((m, r) => (r.amount > m ? r.amount : m), 0n)
+  const reaching = q && redemptions?.filter((r) => r.amount > q.debtAhead).length
 
   // Default: umbrella opens a little above the liquidation line, cover lifts the trove to 150%.
   // A renewal (Renew button or a calendar link) starts from the old policy's strike, cover and next week.
@@ -486,7 +494,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
             {me.hasTrove && price && liq && (
               <div><dt>Collateral ratio</dt><dd>{ratio(me.coll, price, me.debt)} <small>{liq < price ? `(BTC ${((1 - Number(liq) / Number(price)) * 100).toFixed(0)}% above liquidation)` : '(liquidatable now)'}</small></dd></div>
             )}
-            {me.hasTrove && me.queue && me.queue.ahead < me.queue.total && (
+            {q && (
               <div title="Anyone can redeem MUSD for BTC at face value, starting with the loan with the lowest collateral ratio. A redemption repays debt with your BTC: you lose no value, but you lose that BTC. Payung covers liquidation, not redemption.">
                 <dt>Redemption queue</dt>
                 <dd>{(me.queue.ahead + 1n).toLocaleString()} of {me.queue.total.toLocaleString()} <small>({musd(me.queue.debtAhead, 0)} of debt is redeemed first)</small></dd>
@@ -494,9 +502,14 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
             )}
           </dl>
         )}
-        {me.hasTrove && me.queue && me.queue.ahead < me.queue.total && me.queue.debtAhead * 100n < me.queue.totalDebt && (
+        {q && redemptions?.length > 0 && (
+          <p className="fine redemptions">
+            Mezo has processed {redemptions.length} redemptions since {new Date(redemptions[0].timestamp * 1000).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })}, the largest {musd(largest, 0)}, the latest on {date(redemptions.at(-1).timestamp)}. Against today's queue, {reaching} of them would have reached your loan.
+          </p>
+        )}
+        {q && largest != null && q.debtAhead < largest && (
           <p className="note">
-            Your loan is near the front of Mezo's redemption queue: redeeming {musd(me.queue.debtAhead, 0)} would reach it. A redemption repays your debt with your BTC at face value, so you keep the value but lose the BTC. Payung covers liquidation, not redemption; raising your collateral ratio moves you back in the queue.
+            Your loan is near the front of Mezo's redemption queue: one redemption the size of the largest Mezo has seen ({musd(largest, 0)}) would reach it. A redemption repays your debt with your BTC at face value, so you keep the value but lose the BTC. Payung covers liquidation, not redemption; raising your collateral ratio moves you back in the queue.
           </p>
         )}
         {viaRecovery && (

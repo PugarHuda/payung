@@ -107,3 +107,11 @@ test('redemptionQueue matches a walk of Mezo testnet\'s sorted troves', async ()
   assert.ok(q.debtAhead >= d1 + d2 && q.debtAhead - (d1 + d2) < 10n ** 18n) // interest accrues between calls
   assert.equal(none.ahead, none.total) // no loan: nothing to redeem
 })
+
+test('redemptionHistory reads every Redemption Mezo testnet has processed, oldest first', async () => {
+  const { redemptionHistory } = await import('./mezo.js')
+  const h = await redemptionHistory()
+  assert.ok(h.length >= 23) // 23 by Oct 2026; history only grows
+  assert.ok(h.every((r, i) => r.amount > 0n && r.timestamp > 1.7e9 && (i === 0 || r.timestamp >= h[i - 1].timestamp)))
+  assert.ok(h.some((r) => r.amount > 2600n * 10n ** 18n)) // the 2,695 MUSD redemption of Jul 7, 2026
+})

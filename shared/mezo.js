@@ -167,6 +167,14 @@ export async function redemptionQueue(client, borrower) {
   return { ahead, debtAhead, total, totalDebt }
 }
 
+/// Every redemption Mezo's TroveManager has processed: { amount (MUSD redeemed), timestamp }.
+/// Read from the explorer (eth_getLogs only reaches back ~13 h on Mezo's RPC).
+export async function redemptionHistory() {
+  const abi = parseAbi(['event Redemption(uint256 _attemptedMUSDAmount, uint256 _actualMUSDAmount, uint256 _collateralSent, uint256 _collateralFee)'])
+  const logs = await explorerLogs(ADDR.troveManager, abi, 'Redemption', 0)
+  return logs.map((l) => ({ amount: l.args._actualMUSDAmount, timestamp: l.timestamp }))
+}
+
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile
 /// (txs ran out of gas at the estimate). Gas costs ~150 wei there, so use a fixed roomy limit.
 export const GAS = 3_000_000n
