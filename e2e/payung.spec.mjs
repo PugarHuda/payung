@@ -151,6 +151,13 @@ test.describe('without a wallet', () => {
     const rows = page.locator('main.policies tbody tr')
     await expect(rows.first()).toBeVisible()
     for (const pill of await page.locator('main.policies tbody .pill').allInnerTexts()) expect(['Active', 'Paid', 'Expired', 'Touched, paying out']).toContain(pill)
+    // Active cover whose strike is now under the loan's liquidation line (it borrowed more after buying) says so.
+    const [coll, principal, interest] = await createPublicClient({ chain: mezoTestnet, transport: http() }).readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [holder] })
+    const at110 = Number(((principal + interest) * 110n) / 100n) / Number(coll)
+    for (const row of await rows.all()) {
+      const strike = Number((await row.locator('td').first().innerText()).replace(/[$,]/g, ''))
+      if ((await row.locator('.pill').innerText()) === 'Active' && strike <= at110) await expect(row.locator('.under-liq')).toContainText('liquidated before this cover pays')
+    }
     // Nothing can be signed or sent from a view.
     for (const b of await page.getByRole('button', { name: /Pay out now|Re-sign|Send a test alert/ }).all()) await expect(b).toBeDisabled()
     await expect(page.locator('.phone code')).toHaveText(`payung-${holder.toLowerCase().slice(2)}`)
@@ -417,8 +424,8 @@ test.describe('with a wallet on Mezo testnet', () => {
     const [upper, lower] = await repayHints(w.pub, w.account.address, amount)
     const hash = await w.wallet.writeContract({ address: ADDR.sigs, abi: mezoAbi, functionName: 'repayMUSDWithSignature', args: [amount, upper, lower, w.account.address, sig, deadline], gas: GAS })
     expect((await waitForReceipt(w.pub, hash)).status).toBe('success')
-    await page.reload()
-    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    await page.reload() // the wallet already allowed the site: it reconnects without a prompt
+    await expect(page.locator('.acct')).toContainText(w.account.address.slice(0, 6))
     await page.getByRole('button', { name: 'My cover' }).click()
     await expect(row).toContainText('repay signature no longer valid')
     await row.getByRole('button', { name: 'Re-sign' }).click()

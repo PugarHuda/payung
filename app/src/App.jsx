@@ -849,6 +849,8 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
   const list = me.policies ?? []
   // Every armed signature carries the same Mezo nonce: only one of them can be used.
   const armed = list.filter((p) => p.live && !p.triggered && p.autoRepay && p.problem === null)
+  // Borrowing more (or withdrawing BTC) after buying can lift the liquidation line over a strike.
+  const { liq } = me.hasTrove ? liquidationPrice(me, chain.price, chain.tcr) : {}
 
   const rearm = (p) =>
     run(`rearm-${p.id}`, async () => {
@@ -937,6 +939,9 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
                         <button className="small" disabled={!canWrite || !!busy} onClick={() => rearm(p)}>{busy === `rearm-${p.id}` ? 'Signing…' : 'Re-sign'}</button>
                       </>
                     ) : <span title="Dry-run of Mezo's repay just succeeded">Loan, repay checked</span>}
+                    {liq && p.live && !p.triggered && p.strike <= liq && (
+                      <em className="warn under-liq"> Your loan is now liquidated at {usd(liq)}, above this strike: it would be liquidated before this cover pays.</em>
+                    )}
                   </td>
                   <td>
                     <span className={`pill ${status.split(',')[0].toLowerCase()}`}>{status}</span>

@@ -11,3 +11,4 @@ app/dist-fork/
 
 .vercel
 .env*
+keeper/.tmp/
