@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { parseUnits, createPublicClient, http, parseAbi } from 'viem'
+import { generatePrivateKey } from 'viem/accounts'
 import { installWallet } from './wallet.mjs'
 import { mezoTestnet, ADDR, mezoAbi, payungAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
 
@@ -216,6 +217,61 @@ test.describe('without a wallet', () => {
   })
 })
 
+// A brand-new random key: no BTC, no MUSD, no loan. Needs no secret, so it runs in CI in every browser.
+test.describe('without a wallet key: a brand-new empty wallet', () => {
+  test('connects, lists pyMUSD and MUSD in the wallet, reconnects on reload, disconnects', async ({ page }) => {
+    const errors = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    const w = await installWallet(page, generatePrivateKey())
+    await page.goto('./')
+    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    await expect(page.locator('.acct')).toContainText(w.account.address.slice(0, 6))
+    expect(w.state.requests).toContain('wallet_addEthereumChain') // starts on Ethereum without Mezo
+    expect(w.state.chainId).toBe(31611)
+    await expect(page.getByText('This wallet has no Mezo loan.')).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Buy cover/ })).toBeDisabled() // no MUSD (or the vault is booked)
+
+    // EIP-747: the wallet is asked to list both tokens with their real on-chain metadata.
+    await page.getByRole('button', { name: 'Earn by underwriting' }).click()
+    await expect(page.getByText(/Wallet: 0 MUSD\./)).toBeVisible()
+    await page.getByRole('button', { name: 'Add pyMUSD to my wallet' }).click()
+    await expect(page.getByRole('status')).toHaveText('pyMUSD is now listed in your wallet.')
+    await page.getByRole('button', { name: 'Add MUSD to my wallet' }).click()
+    await expect(page.getByRole('status')).toHaveText('MUSD is now listed in your wallet.')
+    const meta = createPublicClient({ chain: mezoTestnet, transport: http() })
+    const erc20 = parseAbi(['function symbol() view returns (string)', 'function decimals() view returns (uint8)'])
+    for (const [i, address] of [ADDR.payung, ADDR.musd].entries()) {
+      const [symbol, decimals] = await Promise.all(['symbol', 'decimals'].map((functionName) => meta.readContract({ address, abi: erc20, functionName })))
+      expect(w.state.watched[i]).toMatchObject({ address, symbol, decimals })
+      expect(w.state.watched[i].image).toMatch(/^https?:\/\/.+\/favicon\.svg$/)
+    }
+
+    // Reload: reconnected from eth_accounts, with no new connect prompt.
+    const prompts = w.state.requests.filter((m) => m === 'eth_requestAccounts').length
+    await page.reload()
+    await expect(page.locator('.acct')).toContainText(w.account.address.slice(0, 6))
+    expect(w.state.requests.filter((m) => m === 'eth_requestAccounts').length).toBe(prompts)
+
+    // Disconnect sticks across a reload.
+    await page.getByRole('button', { name: 'Disconnect' }).click()
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
+    await page.reload()
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
+    await expect(page.locator('.acct')).toHaveCount(0)
+    expect(errors).toEqual([])
+  })
+
+  test('a connect request the user rejects says so and leaves the app usable', async ({ page }) => {
+    await installWallet(page, generatePrivateKey(), undefined, { rejectConnect: true })
+    await page.goto('./')
+    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    await expect(page.getByRole('status')).toHaveText('You cancelled the request in your wallet.')
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
+    await expect(page.locator('.facts div', { hasText: 'Vault value' })).toHaveCount(0) // still on Protect, nothing broken
+    await expect(page.getByRole('slider')).toBeVisible()
+  })
+})
+
 test.describe('with a wallet on Mezo testnet', () => {
   test.skip(!KEY, 'set E2E_KEY (a funded Mezo testnet key with a trove and MUSD)')
 
@@ -379,7 +435,7 @@ test.describe('with a wallet on Mezo testnet', () => {
 
     // Switching accounts in the wallet resets what the app shows.
     await page.evaluate(() => window.__emitWallet('accountsChanged', ['0x000000000000000000000000000000000000dEaD']))
-    await expect(page.locator('.acct')).toHaveText('0x0000…dEaD')
+    await expect(page.locator('.acct')).toContainText('0x0000…dEaD')
     expect(errors).toEqual([])
   })
 })

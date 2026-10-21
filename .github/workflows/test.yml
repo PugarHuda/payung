@@ -36,7 +36,7 @@ jobs:
       - run: npx oxlint app/src
       - run: npm run test:unit
       - run: npx playwright install --with-deps chromium firefox webkit
-      - name: End-to-end, read-only (no wallet key in CI), in Chromium, Firefox and WebKit
+      - name: End-to-end without a wallet key (read-only, plus a fresh random wallet), in Chromium, Firefox and WebKit
         run: npx playwright test -g "without a wallet"
         env:
           E2E_CHANNEL: chromium

@@ -51,7 +51,8 @@ code { background: var(--card); padding: 0 0.3em; border-radius: 4px; }
 }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 1.4rem; font-weight: 700; text-decoration: none; }
 .top nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
-.acct { font-size: 0.9rem; color: var(--mist); }
+.acct { font-size: 0.9rem; color: var(--mist); display: inline-flex; align-items: center; gap: 0.5rem; }
+.tokens { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 button {
   font: 600 0.95rem/1 'Public Sans', sans-serif;

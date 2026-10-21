@@ -5,18 +5,23 @@ import { createPublicClient, createWalletClient, http, numberToHex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet } from '../shared/mezo.js'
 
-export async function installWallet(page, key, rpc) {
+export async function installWallet(page, key, rpc, { rejectConnect = false } = {}) {
   const account = privateKeyToAccount(key)
   const pub = createPublicClient({ chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
   const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
-  const state = { chainId: 1, mezoAdded: false, requests: [] }
+  const state = { chainId: 1, mezoAdded: false, requests: [], watched: [] }
 
   await page.exposeFunction('__walletRpc', async (method, params = []) => {
     state.requests.push(method)
     switch (method) {
       case 'eth_requestAccounts':
-      case 'eth_accounts':
+        if (rejectConnect) throw { code: 4001, message: 'User rejected the request.' }
         return [account.address]
+      case 'eth_accounts':
+        return rejectConnect ? [] : [account.address]
+      case 'wallet_watchAsset': // EIP-747, as MetaMask takes it (params is an object, not an array)
+        state.watched.push(params.options ?? params[0]?.options)
+        return true
       case 'eth_chainId':
         return numberToHex(state.chainId)
       case 'wallet_addEthereumChain':

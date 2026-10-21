@@ -9,6 +9,7 @@ import './App.css'
 const override = new URLSearchParams(location.search).get('vault')
 const PAYUNG = import.meta.env.DEV && override && isAddress(override) ? override : ADDR.payung
 const ZERO = '0x0000000000000000000000000000000000000000'
+const WALLET_KEY = 'payung.wallet' // the wallet last connected, to reconnect on reload
 const WAD = 10n ** 18n
 const STEP = 1000n * WAD
 const MIN_COVER = 10n * WAD
@@ -273,15 +274,48 @@ export default function App() {
     setChainId(await client.getChainId())
   }
 
+  // Reconnect on reload, without a prompt: eth_accounts only answers for a site the wallet already
+  // allowed. A view link (?address=) stays a view.
+  useEffect(() => {
+    if (provider || WATCH) return
+    let saved
+    try { saved = localStorage.getItem(WALLET_KEY) } catch { return }
+    const w = wallets.find((x) => (x.info.rdns ?? x.info.uuid) === saved)
+    w?.provider.request({ method: 'eth_accounts' }).then(async ([addr]) => {
+      if (!addr) return
+      setProvider(w.provider)
+      setAccount(addr)
+      setChainId(Number(await w.provider.request({ method: 'eth_chainId' })))
+    }, () => {})
+  }, [wallets, provider])
+
+  function disconnect() {
+    try { localStorage.removeItem(WALLET_KEY) } catch {}
+    setProvider(undefined)
+    setAccount(undefined)
+    setMe({})
+  }
+
   async function connectWith(w) {
     setPicking(false)
     try {
       const client = createWalletClient({ chain: mezoTestnet, transport: custom(w.provider) })
       const [addr] = await client.requestAddresses()
+      try { localStorage.setItem(WALLET_KEY, w.info.rdns ?? w.info.uuid) } catch {}
       setProvider(w.provider)
       setAccount(addr)
       setChainId(await client.getChainId())
       await switchChain(client)
+    } catch (e) {
+      setNotice({ kind: 'error', text: explain(e) })
+    }
+  }
+
+  // EIP-747: ask the wallet to list a token, so pyMUSD and MUSD show up next to the user's BTC.
+  async function addToken(address, symbol, decimals) {
+    try {
+      const added = await wallet.watchAsset({ type: 'ERC20', options: { address, symbol, decimals, image: new URL('favicon.svg', location.href).href } })
+      setNotice(added ? { kind: 'ok', text: `${symbol} is now listed in your wallet.` } : { kind: 'error', text: `Your wallet didn't add ${symbol}.` })
     } catch (e) {
       setNotice({ kind: 'error', text: explain(e) })
     }
@@ -335,7 +369,7 @@ export default function App() {
     return wallet.signTypedData({ account, ...repayTypedData({ amount, borrower: account, nonce, deadline }) })
   }
 
-  const ctx = { chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite: !!provider && !!account && !wrongChain, watching }
+  const ctx = { chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, addToken, canWrite: !!provider && !!account && !wrongChain, watching }
 
   return (
     <div className="shell">
@@ -348,7 +382,11 @@ export default function App() {
             <button key={k} className={tab === k ? 'tab on' : 'tab'} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>{label}</button>
           ))}
         </nav>
-        {account && !watching ? <span className="acct" title={account}>{account.slice(0, 6)}…{account.slice(-4)}</span> : <button className="primary" onClick={connect}>Connect wallet</button>}
+        {account && !watching ? (
+          <span className="acct" title={account}>
+            {account.slice(0, 6)}…{account.slice(-4)} <button className="tab" onClick={disconnect}>Disconnect</button>
+          </span>
+        ) : <button className="primary" onClick={connect}>Connect wallet</button>}
       </header>
 
       {picking && (
@@ -609,7 +647,7 @@ const ONE_SHARE = 10n ** 24n // 1 pyMUSD: 18 decimals plus the vault's 6-decimal
 // Volatility samples (every 15 min) are left out: they'd bury everything else. The newest shows as "Last price sample".
 const VAULT_EVENTS = ['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit', 'Withdraw', 'AutoRepayUpdated', 'MaxUtilizationUpdated', 'PremiumTableUpdated', 'Paused', 'Unpaused']
 
-function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, canWrite }) {
+function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, addToken, canWrite }) {
   const [amount, setAmount] = useState('')
   const [activity, setActivity] = useState()
   const [shown, setShown] = useState(12)
@@ -692,6 +730,12 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
             Your position: <strong>{musd(me.assets)}</strong>. Wallet: {musd(me.bal)}.
             {earned != null && <> Earned so far: <strong className="earned">{earned >= 0n ? '+' : '−'}{musd(earned >= 0n ? earned : -earned, 4)}</strong> on {musd(deposited, 0)} deposited.</>}
           </p>
+          {canWrite && (
+            <p className="tokens">
+              <button className="tab" onClick={() => addToken(PAYUNG, 'pyMUSD', 24)}>Add pyMUSD to my wallet</button>
+              <button className="tab" onClick={() => addToken(ADDR.musd, 'MUSD', 18)}>Add MUSD to my wallet</button>
+            </p>
+          )}
           <label className="field">
             <span>Amount (MUSD)</span>
             <input inputMode="decimal" value={amount} aria-invalid={wei === null} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))} />
