@@ -110,7 +110,7 @@ test.describe('without a wallet', () => {
   test('fits a phone screen without sideways scrolling', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 800 })
     await page.goto('./')
-    await expect(page.getByRole('img', { name: /BTC/ })).toBeVisible()
+    await expect(page.getByRole('img', { name: /^BTC \$/ })).toBeVisible()
     for (const tab of ['Protect my loan', 'Earn by underwriting', 'My cover']) {
       await page.getByRole('button', { name: tab }).click()
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
