@@ -680,7 +680,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
         <button className="primary" onClick={connect}>Connect wallet to deposit</button>
       )}
 
-      <Exposure chain={chain} />
+      <Exposure chain={chain} premiums={weekPremiums} />
 
       <h2>Vault activity</h2>
       {activity === undefined && <p className="lede">Loading from the Mezo explorer…</p>}
@@ -702,12 +702,14 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
 
 /** Stress test from the vault's own strike book: what it pays if BTC falls to each sold strike
  *  before the cover on it ends. A fall touches every strike above it too, so the payouts add up. */
-function Exposure({ chain }) {
+function Exposure({ chain, premiums }) {
   const open = chain.strikes?.filter((s) => !s.triggered && s.cover > 0n && s.expiry > nowSec())
   if (!open || !chain.price) return null
   if (!open.length) return <p className="lede">No open cover right now, so a BTC fall costs the vault nothing.</p>
   const byStrike = new Map()
   for (const s of open) byStrike.set(s.strike, (byStrike.get(s.strike) ?? 0n) + s.cover)
+  // Expected payout at the on-chain volatility: each strike's cover times its chance of a touch before it ends.
+  const expected = chain.vol == null ? null : open.reduce((s, o) => s + Number(formatUnits(o.cover, 18)) * touchChance(1 - Number(o.strike) / Number(chain.price), Number(formatUnits(chain.vol, 18)), Number(o.expiry - nowSec())), 0)
   const rows = [...byStrike].sort(([a], [b]) => (b > a ? 1 : -1)).reduce((acc, [strike, cover]) => [...acc, { strike, cover, paid: (acc.at(-1)?.paid ?? chain.owed ?? 0n) + cover }], []) // owed: touched, waiting to be paid
   return (
     <>
@@ -727,6 +729,12 @@ function Exposure({ chain }) {
           ))}
         </tbody>
       </table>
+      {expected != null && premiums != null && (
+        <p className="fine expected">
+          At the on-chain volatility of {pct(chain.vol, 0)}, the vault expects to pay about <strong>{expected.toLocaleString('en-US', { maximumFractionDigits: 2 })} MUSD</strong> on its open cover,
+          against <strong>{musd(premiums)}</strong> of premiums already collected for it. Each strike counts its cover times its chance of a touch before that cover ends.
+        </p>
+      )}
     </>
   )
 }
@@ -909,7 +917,7 @@ function Odds({ btc, price, strike, liq, vol, expiry }) {
   )
 }
 
-/** Vertical price shaft: where BTC is, where the umbrella opens, where liquidation sits. */
+/** 1 pyMUSD over time, read from the vault at past blocks. */
 function SharePrice({ history }) {
   if (history === undefined) return <p className="lede">Reading the share price history from Mezo…</p>
   if (!history || history.length < 2) return null
@@ -936,6 +944,7 @@ function SharePrice({ history }) {
   )
 }
 
+/** Vertical price shaft: where BTC is, where the umbrella opens, where liquidation sits. */
 function Gauge({ price, strike, liq }) {
   if (!price) return <div className="gauge empty">Reading the Mezo price feed…</div>
   const top = Number(price) * 1.04

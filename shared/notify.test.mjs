@@ -26,7 +26,7 @@ test('topic is the prefix plus the lowercased address, within ntfy limits', () =
 
 test('a signed alert reads back with its signer; unsigned and tampered ones do not', async () => {
   assert.equal((await readAlerts(holder)).length, 0)
-  await notify(holder, { title: 'BTC near', message: 'within 3%', tag: 'near-0xvault-7' }, keeper)
+  await notify(holder, { title: 'BTC near', message: 'within 3%', tag: 'near-0xvault-7', priority: 5 }, keeper)
   // Someone else posts the same tag with no signature, and a copy of the keeper's signature on altered text.
   await settled(1)
   const sig = (await fetch(`${NTFY}/${topicFor(holder)}/json?poll=1`).then((r) => r.text())).match(/sig-0x[0-9a-f]+/)[0]
@@ -37,7 +37,8 @@ test('a signed alert reads back with its signer; unsigned and tampered ones do n
   const alerts = await settled(4)
   assert.equal(alerts.length, 4)
   const fromKeeper = alerts.filter((a) => a.signer === keeper.address)
-  assert.deepEqual(fromKeeper.map((a) => [a.tag, a.title]), [['near-0xvault-7', 'BTC near']])
+  assert.deepEqual(fromKeeper.map((a) => [a.tag, a.title, a.priority]), [['near-0xvault-7', 'BTC near', 5]])
+  assert.equal(alerts.find((a) => a.tag === 'paid-0xvault-8').priority, 3) // ntfy's default
   assert.equal(alerts.find((a) => a.title === 'Claim your payout').signer === keeper.address, false) // replayed signature, new text
   assert.equal(alerts.find((a) => a.tag === 'paid-0xvault-7').signer, null) // unsigned
   assert.equal(alerts.find((a) => a.tag === 'paid-0xvault-8').signer, intruder.address) // signed, but not by a keeper

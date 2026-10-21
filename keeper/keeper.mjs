@@ -76,6 +76,7 @@ async function tick() {
       if (BigInt(Math.floor(Date.now() / 1000)) < p.expiry && price * 100n <= p.strike * ALERT_BAND) {
         await alert(p.holder, {
           tag: `near-${payung.toLowerCase()}-${id}`,
+          priority: 5, // a loan may be minutes from liquidation: ring through Do Not Disturb
           title: `BTC is ${usd(price)}, within 3% of your ${usd(p.strike)} strike`,
           message: `If it touches before ${new Date(Number(p.expiry) * 1000).toUTCString()}, ${Number(formatUnits(p.cover, 18))} MUSD goes ${p.autoRepay ? 'into your Mezo loan' : 'to your wallet'}.`,
         })

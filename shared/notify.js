@@ -17,11 +17,11 @@ export const topicFor = (address, prefix = PREFIX) => `${prefix}${address.toLowe
 const signed = (topic, { tag, title, message }) => `Payung alert\ntopic: ${topic}\ntag: ${tag}\ntitle: ${title}\nmessage: ${message}`
 
 /** Publish one alert, signed by `signer` (a viem account, or anything with signMessage({ message })).
- *  `tag` names the event (e.g. paid-<vault>-<id>). */
-export async function notify(address, { title, message, tag }, signer) {
+ *  `tag` names the event (e.g. paid-<vault>-<id>); `priority` is ntfy's 1–5 (5 rings through Do Not Disturb on Android). */
+export async function notify(address, { title, message, tag, priority }, signer) {
   const topic = topicFor(address)
   const signature = await signer.signMessage({ message: signed(topic, { tag, title, message }) })
-  const res = await fetch(NTFY, { method: 'POST', body: JSON.stringify({ topic, title, message, tags: ['umbrella', tag, `sig-${signature}`] }) })
+  const res = await fetch(NTFY, { method: 'POST', body: JSON.stringify({ topic, title, message, priority, tags: ['umbrella', tag, `sig-${signature}`] }) })
   if (!res.ok) throw new Error(`ntfy ${res.status}: ${await res.text()}`)
 }
 
@@ -37,7 +37,7 @@ export async function readAlerts(address, prefix) {
     const signer = signature
       ? await recoverMessageAddress({ message: signed(topic, { tag, title: m.title, message: m.message }), signature }).catch(() => null)
       : null
-    return { id: m.id, time: m.time, title: m.title, message: m.message, tag, signer }
+    return { id: m.id, time: m.time, title: m.title, message: m.message, priority: m.priority ?? 3, tag, signer }
   }))
   return alerts.reverse()
 }

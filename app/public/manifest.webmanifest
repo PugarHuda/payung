@@ -1,0 +1,11 @@
+{
+  "name": "Payung: liquidation cover for Mezo",
+  "short_name": "Payung",
+  "description": "Weekly liquidation cover for Mezo MUSD borrowers.",
+  "start_url": "./?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#e8eef0",
+  "theme_color": "#e8eef0",
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

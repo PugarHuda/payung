@@ -33,6 +33,10 @@ test.describe('without a wallet', () => {
     const nums = totals.map((t) => Number(t.replace(/[^\d.]/g, '')))
     expect(nums.length).toBeGreaterThan(0)
     expect(nums).toEqual([...nums].sort((a, b) => a - b))
+    // Expected payout is a positive amount, and below the worst case (every strike touched).
+    const expected = Number((await page.locator('.expected strong').first().innerText()).replace(/[^\d.]/g, ''))
+    expect(expected).toBeGreaterThan(0)
+    expect(expected).toBeLessThan(nums.at(-1))
     // Older events page in from the whole history.
     const shown = await page.locator('.activity li').count()
     await page.getByRole('button', { name: /Show older/ }).click()
@@ -116,6 +120,11 @@ test.describe('without a wallet', () => {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
       expect(overflow, `${tab} overflows`).toBeLessThanOrEqual(0)
     }
+    // Installable on the home screen: the linked manifest loads and its icon is served.
+    const href = await page.locator('link[rel=manifest]').getAttribute('href')
+    const manifest = await (await page.request.get(new URL(href, page.url()).href)).json()
+    expect(manifest).toMatchObject({ short_name: 'Payung', display: 'standalone' })
+    expect((await page.request.get(new URL(manifest.icons[0].src, page.url()).href)).ok()).toBe(true)
   })
 
   test('has no WCAG A/AA violations on any tab (axe-core)', async ({ page }) => {
