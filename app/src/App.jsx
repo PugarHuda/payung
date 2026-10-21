@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, parseEventLogs } from 'viem'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
+import { touchChance, touchRate } from '../../shared/odds.js'
 import './App.css'
 
 // ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
@@ -22,6 +23,19 @@ const EXPLORER = mezoTestnet.blockExplorers.default.url
 // VITE_MEZO_RPC points the app at another node, e.g. the anvil fork the touch e2e test runs.
 // batch.multicall: reads issued together go to Mezo as one Multicall3 eth_call instead of dozens.
 const pub = createPublicClient({ chain: mezoTestnet, batch: { multicall: true }, transport: http(import.meta.env.VITE_MEZO_RPC, { timeout: 30_000 }) }) // slow RPCs exist; viem defaults to 10 s
+
+// Archive reads of Mezo's BTC oracle, JSON-RPC batched (Mezo's RPC takes 100 calls per request).
+const archive = createPublicClient({ chain: mezoTestnet, transport: http(import.meta.env.VITE_MEZO_RPC, { batch: { batchSize: 100 }, timeout: 30_000 }) })
+const HISTORY_DAYS = 30
+const HISTORY_STEP = 1500n // blocks: ~2 hours at Mezo's ~4.8 s blocks
+/** BTC on Mezo's oracle every ~2 hours for 30 days, oldest first: [{ t, p }]. */
+async function btcHistory() {
+  const head = await archive.getBlockNumber()
+  const n = Math.round((HISTORY_DAYS * 86400) / 4.8 / Number(HISTORY_STEP))
+  const rounds = await Promise.all(Array.from({ length: n }, (_, i) =>
+    archive.readContract({ address: ADDR.oracle, abi: mezoAbi, functionName: 'latestRoundData', blockNumber: head - BigInt(n - 1 - i) * HISTORY_STEP })))
+  return rounds.map((r) => ({ t: Number(r[3]), p: Number(formatUnits(r[1], 18)) }))
+}
 
 const usd = (v, d = 0) => (v == null ? '…' : '$' + Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }))
 const musd = (v, d = 2) => (v == null ? '…' : Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }) + ' MUSD')
@@ -118,6 +132,10 @@ export default function App() {
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState()
   const [prefill, setPrefill] = useState(linkPrefill)
+  const [btc, setBtc] = useState() // 30 days of BTC on Mezo's oracle; null if the archive reads fail
+  useEffect(() => {
+    btcHistory().then(setBtc, () => setBtc(null))
+  }, [])
   const [alerts, setAlerts] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted')
   const alerted = useRef(new Set())
 
@@ -344,7 +362,7 @@ export default function App() {
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
       {notice && <p className={`banner ${notice.kind}`} role="status">{notice.text} {notice.hash && txLink(notice.hash)}</p>}
 
-      {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} />}
+      {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
       {tab === 'policies' && <Policies {...ctx} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
         setPrefill({ strike: p.strike, cover: formatUnits(p.cover, 18), expiry: p.expiry + WEEK })
@@ -358,7 +376,7 @@ export default function App() {
   )
 }
 
-function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite, prefill }) {
+function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite, prefill, btc }) {
   const { price, capacity, vol, tcr } = chain
   const [weeks, setWeeks] = useState(1)
   const [moved, setMoved] = useState() // a renewal's old strike, when today's band no longer allows it
@@ -533,6 +551,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           Priced from BTC volatility measured on-chain from Mezo's price feed ({pct(vol, 0)} a year) and the {expiry ? left(expiry) : '…'} the cover runs: the longer it runs, the likelier a touch.
           You pay at most 3% more than this quote.
         </p>
+        <Odds btc={btc} price={price} strike={strike} liq={liq} vol={vol} expiry={expiry} />
         {cantPay && <em className="warn">You have {musd(me.bal)}. Borrow or buy MUSD on Mezo to pay the premium.</em>}
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
@@ -816,6 +835,39 @@ function calendar(p) {
     'END:VEVENT', 'END:VCALENDAR',
   ].map((l) => l.match(/.{1,74}/g).join('\r\n ')).join('\r\n') // RFC 5545: fold lines over 75 octets
   return `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`
+}
+
+/** How likely is a touch: the on-chain-vol model next to what BTC actually did on Mezo's oracle,
+ *  with the 30-day path drawn against the strike and the liquidation line. */
+function Odds({ btc, price, strike, liq, vol, expiry }) {
+  if (btc === undefined) return <p className="fine">Reading 30 days of BTC from Mezo's oracle…</p>
+  if (!btc?.length || !price || !strike || !expiry || vol == null) return null
+  const drop = 1 - Number(strike) / Number(price)
+  const seconds = Number(expiry - nowSec())
+  const model = touchChance(drop, Number(formatUnits(vol, 18)), seconds)
+  const { hits, windows } = touchRate(btc, drop, seconds)
+  const low = btc.reduce((m, h) => (h.p < m.p ? h : m))
+  const marks = [Number(strike) / 1e18, liq ? Number(liq) / 1e18 : null].filter(Boolean)
+  const lo = Math.min(low.p, ...marks) * 0.995
+  const hi = Math.max(...btc.map((h) => h.p)) * 1.005
+  const x = (t) => ((t - btc[0].t) / (btc.at(-1).t - btc[0].t || 1)) * 300
+  const y = (p) => 78 - ((p - lo) / (hi - lo)) * 76
+  const pctOf = (v) => (v < 0.001 ? 'under 0.1%' : `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`)
+  const separate = Math.floor((btc.at(-1).t - btc[0].t) / seconds) // windows overlap; this many don't
+  return (
+    <figure className="history odds">
+      <svg viewBox="0 0 300 80" preserveAspectRatio="none" role="img" aria-label={`BTC over 30 days on Mezo's oracle, low ${usd(BigInt(Math.round(low.p)) * WAD)}, against the ${usd(strike)} strike`}>
+        <line x1="0" x2="300" y1={y(Number(strike) / 1e18)} y2={y(Number(strike) / 1e18)} className="strike" />
+        {liq && <line x1="0" x2="300" y1={y(Number(liq) / 1e18)} y2={y(Number(liq) / 1e18)} className="liq" />}
+        <polyline points={btc.map((h) => `${x(h.t).toFixed(1)},${y(h.p).toFixed(1)}`).join(' ')} />
+      </svg>
+      <figcaption>
+        Chance BTC touches {usd(strike)} in the {left(expiry)} left: about <strong>{pctOf(model)}</strong> at the on-chain volatility.
+        {windows > 0 && <> Over the last 30 days on Mezo's oracle, BTC fell {(drop * 100).toFixed(1)}% or more within {left(expiry)} in {hits} of {windows} overlapping stretches{separate < 4 ? ` (30 days hold only ${separate || 'under one'} separate stretch${separate === 1 ? '' : 'es'} this long, so read it loosely)` : ''}.</>}
+        {' '}30-day low: {usd(BigInt(Math.round(low.p)) * WAD)} on {date(low.t)}. Gold line: your strike{liq ? '; red: liquidation' : ''}.
+      </figcaption>
+    </figure>
+  )
 }
 
 /** Vertical price shaft: where BTC is, where the umbrella opens, where liquidation sits. */

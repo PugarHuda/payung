@@ -135,16 +135,23 @@ export async function explorerReceipt(hash) {
 
 /// Every `eventName` log a contract emitted since `fromBlock`, decoded. Mezo's RPC caps eth_getLogs
 /// at 10,000 blocks (~13 h); the explorer's Etherscan-style getLogs takes the whole range, one topic.
-/// ponytail: the explorer returns at most 1,000 logs per call; page by block when one event outgrows it.
+/// Over the cap the explorer returns the NEWEST 1,000 logs per call (in ascending order) and ignores
+/// page/offset, so page backwards: end the next call at the oldest block seen and drop what was read.
 export async function explorerLogs(address, abi, eventName, fromBlock) {
   const topic0 = toEventSelector(getAbiItem({ abi, name: eventName }))
-  const { result, message } = await fetch(`${EXPLORER_API.replace('/v2', '')}?module=logs&action=getLogs&address=${address}&topic0=${topic0}&fromBlock=${fromBlock}&toBlock=latest`).then((r) => r.json())
-  if (!Array.isArray(result)) throw new Error(`explorer getLogs: ${message}`) // "No logs found" still comes with []
-  return parseEventLogs({
-    abi,
-    eventName,
-    logs: result.map((l) => ({ address: l.address, topics: l.topics.filter(Boolean), data: l.data, blockNumber: BigInt(l.blockNumber), logIndex: Number(l.logIndex), transactionHash: l.transactionHash, timestamp: Number(l.timeStamp) })),
-  })
+  let logs = []
+  for (let to = 'latest'; ;) {
+    const { result, message } = await fetch(`${EXPLORER_API.replace('/v2', '')}?module=logs&action=getLogs&address=${address}&topic0=${topic0}&fromBlock=${fromBlock}&toBlock=${to}`).then((r) => r.json())
+    if (!Array.isArray(result)) throw new Error(`explorer getLogs: ${message}`) // "No logs found" still comes with []
+    const oldest = logs[0]
+    const page = result
+      .map((l) => ({ address: l.address, topics: l.topics.filter(Boolean), data: l.data, blockNumber: BigInt(l.blockNumber), logIndex: Number(l.logIndex), transactionHash: l.transactionHash, timestamp: Number(l.timeStamp) }))
+      .filter((l) => !oldest || l.blockNumber < oldest.blockNumber || l.logIndex < oldest.logIndex)
+    logs = [...page, ...logs]
+    if (result.length < 1000 || !page.length) break // ponytail: a single block with 1,000+ matching logs would stop here
+    to = logs[0].blockNumber
+  }
+  return parseEventLogs({ abi, eventName, logs })
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

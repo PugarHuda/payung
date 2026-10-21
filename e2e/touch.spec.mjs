@@ -51,7 +51,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     await fork.request({ method: 'anvil_mine', params: ['0x1'] }) // Mezo headers lack blob-gas fields; a local block has them
     await fork.request({ method: 'anvil_setCode', params: [ADDR.priceFeed, RETURN_SLOT0] })
     execSync('npx vite build --outDir dist-fork', { cwd: 'app', stdio: 'ignore', env: { ...process.env, VITE_MEZO_RPC: RPC } })
-    start('npm run preview -w app -- --outDir dist-fork --port 4784 --strictPort')
+    start('npm run preview -w app -- --outDir dist-fork --port 4784 --strictPort', { VITE_MEZO_RPC: RPC }) // CSP lets the app reach the fork
     await until(async () => (await fetch(APP)).ok)
   })
 

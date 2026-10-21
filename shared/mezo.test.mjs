@@ -65,3 +65,29 @@ test('reads batch through Mezo testnet Multicall3', async () => {
   const direct = createPublicClient({ chain: mezoTestnet, transport: http() })
   assert.deepEqual(viaMulticall, await Promise.all(names.map((n) => direct.readContract({ address: ADDR.payung, abi: payungAbi, functionName: n, blockNumber }))))
 })
+
+// Live check: past the explorer's 1,000-log cap. MUSD transfers on Mezo testnet run to many thousands;
+// paging by block must return more than one page, in order, with no log twice.
+test('explorerLogs pages past 1,000 logs without duplicates', async () => {
+  const { parseAbi } = await import('viem')
+  const { ADDR } = await import('./mezo.js')
+  const abi = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
+  const logs = await explorerLogs(ADDR.musd, abi, 'Transfer', 16_000_000n)
+  assert.ok(logs.length > 1000, `only ${logs.length}`)
+  const keys = logs.map((l) => `${l.blockNumber}-${l.logIndex}`)
+  assert.equal(new Set(keys).size, keys.length)
+  assert.ok(logs.every((l, i) => i === 0 || l.blockNumber > logs[i - 1].blockNumber || (l.blockNumber === logs[i - 1].blockNumber && l.logIndex > logs[i - 1].logIndex)))
+})
+
+// Live check: the explorer's pages hold exactly what Mezo's own RPC returns for the same window.
+test('explorerLogs matches eth_getLogs over the same blocks', async () => {
+  const { createPublicClient, http, parseAbi, getAbiItem } = await import('viem')
+  const { mezoTestnet, ADDR } = await import('./mezo.js')
+  const abi = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
+  const pub = createPublicClient({ chain: mezoTestnet, transport: http() })
+  const end = (await pub.getBlockNumber()) - 100n // let the explorer's indexer catch up
+  const start = end - 9_000n // the RPC caps eth_getLogs at 10,000 blocks
+  const rpc = await pub.getLogs({ address: ADDR.musd, event: getAbiItem({ abi, name: 'Transfer' }), fromBlock: start, toBlock: end })
+  const explorer = (await explorerLogs(ADDR.musd, abi, 'Transfer', start)).filter((l) => l.blockNumber <= end)
+  assert.deepEqual(explorer.map((l) => `${l.transactionHash}-${l.logIndex}`), rpc.map((l) => `${l.transactionHash}-${l.logIndex}`))
+})

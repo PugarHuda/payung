@@ -56,6 +56,57 @@ test.describe('without a wallet', () => {
     await expect(page.locator('em.hint')).toHaveCount(0)
   })
 
+  test('touch odds: on-chain-vol model and a backtest over 30 days of Mezo oracle history', async ({ page }) => {
+    await page.goto('./')
+    const caption = page.locator('.odds figcaption')
+    const chance = async () => {
+      const m = (await caption.innerText()).match(/about (under 0\.1|[\d.]+)%/)
+      return m[1] === 'under 0.1' ? 0 : Number(m[1])
+    }
+    await expect(caption).toContainText(/Over the last 30 days on Mezo's oracle, BTC fell [\d.]+% or more within .* in \d+ of \d+ overlapping stretches/, { timeout: 60_000 })
+    await expect(caption).toContainText(/30-day low: \$[\d,]+ on /)
+    await expect(page.getByRole('img', { name: /BTC over 30 days on Mezo's oracle, low \$[\d,]+/ })).toBeVisible()
+    // ~360 archive points drawn
+    expect((await page.locator('.odds polyline').getAttribute('points')).split(' ').length).toBeGreaterThan(300)
+    const oneWeek = await chance()
+    await page.locator('.seg label', { hasText: '4 weeks' }).click()
+    await expect(caption).toContainText('only 1 separate stretch') // 30 days hold one 3-4 week stretch
+    expect(await chance()).toBeGreaterThan(oneWeek) // longer cover, likelier touch
+    // A nearer strike is likelier to be touched.
+    await page.getByRole('slider').focus()
+    const far = await chance()
+    await page.keyboard.press('End')
+    await expect.poll(chance).toBeGreaterThan(far)
+  })
+
+  test('runs under a strict CSP with no violations and refuses to be framed', async ({ page, baseURL }) => {
+    // A page that asks for wallet signatures must not be framable (clickjacking).
+    const res = await page.goto('./')
+    const h = res.headers()
+    expect(h['content-security-policy']).toContain("frame-ancestors 'none'")
+    expect(h['content-security-policy']).toContain("script-src 'self';")
+    expect(h['x-frame-options']).toBe('DENY')
+    expect(h['x-content-type-options']).toBe('nosniff')
+    // Every tab loads its live data (RPC, explorer, fonts) without tripping the policy.
+    const violations = []
+    page.on('console', (m) => /Content Security Policy/i.test(m.text()) && violations.push(m.text()))
+    await page.addInitScript(() => document.addEventListener('securitypolicyviolation', (e) => console.error(`Content Security Policy: ${e.violatedDirective} ${e.blockedURI}`)))
+    await page.reload()
+    await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
+    await page.getByRole('button', { name: 'Earn by underwriting' }).click()
+    await expect(page.locator('.activity')).toContainText('Cover bought')
+    await expect(page.locator('.history figcaption')).toBeVisible()
+    await page.getByRole('button', { name: 'My cover' }).click()
+    expect(violations).toEqual([])
+    // Framed by another page: the browser refuses to render it.
+    await page.goto('about:blank')
+    await page.setContent(`<iframe src="${baseURL}" width="800" height="600"></iframe>`)
+    await page.waitForTimeout(3000)
+    const frame = page.frames().find((f) => f !== page.mainFrame())
+    expect(frame.url()).toMatch(/^chrome-error:/) // Chromium's blocked-frame page, not the app
+    expect(await frame.getByText('Open an umbrella').count()).toBe(0)
+  })
+
   test('fits a phone screen without sideways scrolling', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 800 })
     await page.goto('./')
@@ -147,11 +198,18 @@ test.describe('with a wallet on Mezo testnet', () => {
     const amountBox = page.getByLabel('Amount (MUSD)')
     // Read capacity now, while the chain is settled: right after a transaction a lagging RPC node
     // can still answer with the old value. Withdrawing 20 MUSD takes 10 off it.
-    const capacity = Number(await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })) / 1e18 - 10
+    // coverCapacity() stops at 0; rebuild it unclamped, as the contract does: (balance - owed) x cap - locked.
+    const p = (functionName) => w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName })
+    const [vaultBal, owed, maxUtil, locked] = await Promise.all([w.pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [ADDR.payung] }), p('totalOwed'), p('maxUtilization'), p('totalLocked')])
+    const capacity = (Number(vaultBal - owed) * Number(maxUtil)) / 1e4 / 1e18 - Number(locked) / 1e18 - 10
+    const wallet = Number(await w.pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [w.account.address] })) / 1e18 + 20
+    const needed = Math.max(10, Math.ceil(((15 - capacity) * 2) / 10) * 10)
+    // The live vault is shared and its cover locks until expiry: say so plainly rather than wait on a disabled button.
+    expect(needed, `the vault needs a ${needed} MUSD deposit for this run's cover and the test wallet holds ${wallet.toFixed(2)}; fund it or wait for an expiry to free capacity`).toBeLessThanOrEqual(wallet)
     await amountBox.fill('20')
     await page.getByRole('button', { name: 'Withdraw' }).click()
     await expect(page.getByRole('status')).toContainText('Withdrew 20 MUSD.', { timeout: 180_000 })
-    const topUp = Math.max(10, Math.ceil(((15 - capacity) * 2) / 10) * 10)
+    const topUp = needed
     await amountBox.fill(String(topUp))
     await page.getByRole('button', { name: 'Deposit' }).click()
     await expect(page.getByRole('status')).toContainText(`Deposited ${topUp} MUSD.`, { timeout: 180_000 })
