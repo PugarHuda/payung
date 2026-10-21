@@ -1,6 +1,7 @@
 // Shared by the keeper and the app. Mezo testnet (matsnet) addresses from github.com/mezo-org/musd.
-import { defineChain, parseAbi, parseEventLogs, toEventSelector, getAbiItem, ContractFunctionRevertedError } from 'viem'
+import { defineChain, parseAbi, parseEventLogs, toEventSelector, getAbiItem, ContractFunctionRevertedError, encodeDeployData, decodeAbiParameters } from 'viem'
 import payungAbi from '../payung.abi.json' with { type: 'json' }
+import lens from './redemptionQueue.json' with { type: 'json' }
 
 export const mezoTestnet = defineChain({
   id: 31611,
@@ -152,6 +153,18 @@ export async function explorerLogs(address, abi, eventName, fromBlock) {
     to = logs[0].blockNumber
   }
   return parseEventLogs({ abi, eventName, logs })
+}
+
+/// Where `borrower` stands in Mezo's redemption queue: redemptions swap MUSD for collateral
+/// starting at the loan with the lowest collateral ratio. One eth_call runs the never-deployed
+/// RedemptionQueue lens (contracts/src/RedemptionQueue.sol), which walks every sorted trove.
+/// `ahead` = loans redeemed before this one; `ahead === total` means the borrower has no loan.
+export async function redemptionQueue(client, borrower) {
+  const { data } = await client.call({
+    data: encodeDeployData({ abi: [{ type: 'constructor', inputs: [{ type: 'address' }, { type: 'address' }, { type: 'address' }] }], bytecode: lens.bytecode, args: [ADDR.sortedTroves, ADDR.troveManager, borrower] }),
+  })
+  const [ahead, debtAhead, total, totalDebt] = decodeAbiParameters(['uint256', 'uint256', 'uint256', 'uint256'].map((type) => ({ type })), data)
+  return { ahead, debtAhead, total, totalDebt }
 }
 
 /// Mezo testnet's eth_estimateGas undershoots calls that read the BTC oracle precompile

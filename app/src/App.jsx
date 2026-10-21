@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, parseEventLogs } from 'viem'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, redemptionQueue, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
 import { touchChance, touchRate } from '../../shared/odds.js'
 import { NTFY, KEEPERS, notify, readAlerts, topicFor } from '../../shared/notify.js'
 import './App.css'
@@ -209,15 +209,16 @@ export default function App() {
     const full = new Set(expiries.filter((_, i) => lists[i].length >= MAX_STRIKES))
     setChain({ price, priceAt: round?.[3], nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, paused, touchable, strikes, full })
     if (!account) return
-    const [debtColl, status, bal, code, shares, ids] = await Promise.all([
+    const [debtColl, status, bal, code, shares, ids, queue] = await Promise.all([
       readM(ADDR.troveManager, 'getEntireDebtAndColl', [account]),
       readM(ADDR.troveManager, 'getTroveStatus', [account]),
       readM(ADDR.musd, 'balanceOf', [account]),
       pub.getCode({ address: account }),
       readP('balanceOf', [account]),
       readP('policiesOf', [account]),
+      redemptionQueue(pub, account).catch(() => null), // extra, so an RPC hiccup only hides that line
     ])
-    const mine = { coll: debtColl[0], debt: debtColl[1] + debtColl[2], hasTrove: status === 1n, bal, shares }
+    const mine = { coll: debtColl[0], debt: debtColl[1] + debtColl[2], hasTrove: status === 1n, bal, shares, queue }
     // Mezo checks repay signatures with ECDSA, so smart accounts (e.g. Mezo Passport BTC wallets) can't pre-sign.
     mine.smartAccount = !!code && code !== '0x'
     ;[mine.assets, mine.maxWithdraw] = await Promise.all([readP('convertToAssets', [shares]), readP('maxWithdraw', [account])])
@@ -485,7 +486,18 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
             {me.hasTrove && price && liq && (
               <div><dt>Collateral ratio</dt><dd>{ratio(me.coll, price, me.debt)} <small>{liq < price ? `(BTC ${((1 - Number(liq) / Number(price)) * 100).toFixed(0)}% above liquidation)` : '(liquidatable now)'}</small></dd></div>
             )}
+            {me.hasTrove && me.queue && me.queue.ahead < me.queue.total && (
+              <div title="Anyone can redeem MUSD for BTC at face value, starting with the loan with the lowest collateral ratio. A redemption repays debt with your BTC: you lose no value, but you lose that BTC. Payung covers liquidation, not redemption.">
+                <dt>Redemption queue</dt>
+                <dd>{(me.queue.ahead + 1n).toLocaleString()} of {me.queue.total.toLocaleString()} <small>({musd(me.queue.debtAhead, 0)} of debt is redeemed first)</small></dd>
+              </div>
+            )}
           </dl>
+        )}
+        {me.hasTrove && me.queue && me.queue.ahead < me.queue.total && me.queue.debtAhead * 100n < me.queue.totalDebt && (
+          <p className="note">
+            Your loan is near the front of Mezo's redemption queue: redeeming {musd(me.queue.debtAhead, 0)} would reach it. A redemption repays your debt with your BTC at face value, so you keep the value but lose the BTC. Payung covers liquidation, not redemption; raising your collateral ratio moves you back in the queue.
+          </p>
         )}
         {viaRecovery && (
           <p className="note">

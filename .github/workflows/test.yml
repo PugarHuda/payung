@@ -17,6 +17,9 @@ jobs:
       - name: Unit and fuzz tests
         run: forge test --no-match-contract Fork -vv
         working-directory: contracts
+      - name: The app's redemption-queue bytecode is built from RedemptionQueue.sol
+        run: node -e "const b=require('./out/RedemptionQueue.sol/RedemptionQueue.json').bytecode.object; if (b !== require('../shared/redemptionQueue.json').bytecode) { console.error('shared/redemptionQueue.json is stale'); process.exit(1) }"
+        working-directory: contracts
       - name: Fork tests against the live MUSD system on Mezo testnet
         run: forge test --match-contract PayungFork --fork-url https://rpc.test.mezo.org -vv
         working-directory: contracts

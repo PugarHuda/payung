@@ -91,3 +91,19 @@ test('explorerLogs matches eth_getLogs over the same blocks', async () => {
   const explorer = (await explorerLogs(ADDR.musd, abi, 'Transfer', start)).filter((l) => l.blockNumber <= end)
   assert.deepEqual(explorer.map((l) => `${l.transactionHash}-${l.logIndex}`), rpc.map((l) => `${l.transactionHash}-${l.logIndex}`))
 })
+
+test('redemptionQueue matches a walk of Mezo testnet\'s sorted troves', async () => {
+  const { createPublicClient, http, parseAbi } = await import('viem')
+  const { mezoTestnet, ADDR, redemptionQueue } = await import('./mezo.js')
+  const c = createPublicClient({ chain: mezoTestnet, transport: http() })
+  const abi = parseAbi(['function getLast() view returns (address)', 'function getPrev(address) view returns (address)', 'function getSize() view returns (uint256)'])
+  const lowest = await c.readContract({ address: ADDR.sortedTroves, abi, functionName: 'getLast' })
+  const second = await c.readContract({ address: ADDR.sortedTroves, abi, functionName: 'getPrev', args: [lowest] })
+  const third = await c.readContract({ address: ADDR.sortedTroves, abi, functionName: 'getPrev', args: [second] })
+  const debt = async (who) => { const [, p, i] = await c.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [who] }); return p + i }
+  const [q, none, size, d1, d2] = await Promise.all([redemptionQueue(c, third), redemptionQueue(c, '0x' + '0'.repeat(39) + '1'), c.readContract({ address: ADDR.sortedTroves, abi, functionName: 'getSize' }), debt(lowest), debt(second)])
+  assert.equal(q.ahead, 2n)
+  assert.equal(q.total, size)
+  assert.ok(q.debtAhead >= d1 + d2 && q.debtAhead - (d1 + d2) < 10n ** 18n) // interest accrues between calls
+  assert.equal(none.ahead, none.total) // no loan: nothing to redeem
+})

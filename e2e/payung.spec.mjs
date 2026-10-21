@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
-import { parseUnits } from 'viem'
+import { parseUnits, createPublicClient, http, parseAbi } from 'viem'
 import { installWallet } from './wallet.mjs'
-import { ADDR, mezoAbi, payungAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
+import { mezoTestnet, ADDR, mezoAbi, payungAbi, repayTypedData, repayHints, waitForReceipt, GAS } from '../shared/mezo.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 
@@ -139,6 +139,8 @@ test.describe('without a wallet', () => {
     await page.goto(`./?address=${holder}`)
     await expect(page.getByRole('status').first()).toContainText('Viewing 0xe42F…9C81 read-only')
     await expect(page.locator('.facts div', { hasText: 'Your loan' }).locator('dd')).toHaveText(/MUSD/)
+    // Its place in Mezo's redemption queue, from one deployless eth_call over every sorted trove.
+    await expect(page.locator('.facts div', { hasText: 'Redemption queue' }).locator('dd')).toHaveText(/^\d[\d,]* of \d[\d,]* \([\d,]+ MUSD of debt is redeemed first\)$/)
     await expect(page.getByRole('button', { name: 'Connect wallet to buy cover' })).toBeVisible()
     await page.getByRole('button', { name: 'My cover' }).click()
     const rows = page.locator('main.policies tbody tr')
@@ -149,6 +151,11 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.phone code')).toHaveText(`payung-${holder.toLowerCase().slice(2)}`)
     const ics = page.locator('a[download$=".ics"]').first()
     if (await ics.count()) expect(decodeURIComponent(await ics.getAttribute('href'))).toMatch(/BEGIN:VEVENT[\s\S]*DTSTART:\d{8}T\d{6}Z[\s\S]*END:VCALENDAR/)
+    // The loan with the lowest collateral ratio is first in line and is told so.
+    const lowest = await createPublicClient({ chain: mezoTestnet, transport: http() }).readContract({ address: ADDR.sortedTroves, abi: parseAbi(['function getLast() view returns (address)']), functionName: 'getLast' })
+    await page.goto(`./?address=${lowest}`)
+    await expect(page.locator('.facts div', { hasText: 'Redemption queue' }).locator('dd')).toHaveText(/^1 of [\d,]+ \(0 MUSD/)
+    await expect(page.getByText("near the front of Mezo's redemption queue")).toBeVisible()
     // Junk in the parameter is ignored: no view, the normal connect button.
     await page.goto('./?address=0x123')
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
