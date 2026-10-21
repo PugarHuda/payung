@@ -104,7 +104,7 @@ cd contracts && slither src/Payung.sol --config-file slither.config.json   # sta
   - **Renewal links** (read-only): a link with an out-of-range strike moves to the nearest allowed one and says so, a later expiry selects that week, and junk parameters are ignored.
   - **Security headers** (read-only): CSP and frame headers present, every tab loads its live data with zero CSP violations, and a page that frames the app gets the browser's blocked-frame page instead.
   - **Touch odds** (read-only): the backtest reads 300+ oracle points; the chance rises with a longer cover and with a nearer strike.
-  - **Read-only checks** (run in CI): the stress-test table's running totals, paging older activity, no-wallet state, phone width without sideways scroll, the installable web-app manifest (add Payung to the home screen), keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
+  - **Read-only checks** (run in CI): Mezo RPC or explorer going down (a banner, no made-up numbers, recovery when it is back), a cover amount typed before the data loads being kept, the stress-test table's running totals, paging older activity, no-wallet state, phone width without sideways scroll, the installable web-app manifest (add Payung to the home screen), keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
 
 CI ([`.github/workflows/test.yml`](.github/workflows/test.yml)) runs unit, fuzz, invariant and fork tests, Slither, lint and the read-only e2e suite on every push.
 

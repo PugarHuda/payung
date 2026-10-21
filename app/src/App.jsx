@@ -132,6 +132,7 @@ export default function App() {
   const [me, setMe] = useState({})
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState()
+  const [offline, setOffline] = useState(false) // the last refresh could not reach Mezo's RPC
   const [prefill, setPrefill] = useState(linkPrefill)
   const [btc, setBtc] = useState() // 30 days of BTC on Mezo's oracle; null if the archive reads fail
   useEffect(() => {
@@ -231,7 +232,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    const tick = () => refresh().catch((e) => console.warn('refresh failed', e))
+    const tick = () => refresh().then(() => setOffline(false), (e) => {
+      console.warn('refresh failed', e)
+      setOffline(true)
+    })
     tick()
     const t = setInterval(tick, 15_000)
     return () => clearInterval(t)
@@ -358,6 +362,7 @@ export default function App() {
           Your wallet is on another network. <button className="small" onClick={() => switchChain().catch((e) => setNotice({ kind: 'error', text: explain(e) }))}>Switch to Mezo testnet</button>
         </p>
       )}
+      {offline && <p className="banner error" role="alert">Can't reach Mezo's RPC ({new URL(mezoTestnet.rpcUrls.default.http[0]).host}) right now, so the numbers below may be missing or out of date. Retrying every 15 seconds.</p>}
       {chain.price === null && <p className="banner error">The Mezo price feed is not answering right now, so new cover and deposits are on hold. Withdrawals, triggers and payouts still work.</p>}
       {chain.paused && <p className="banner error">The vault owner has paused new cover. Existing cover, triggers, payouts, deposits and withdrawals keep working.</p>}
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
@@ -406,8 +411,8 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
     if (prefill?.cover) setCover(prefill.cover)
     else if (me.hasTrove) {
       const need = me.debt - (me.coll * s * 100n) / TARGET_CR / WAD
-      setCover(need > MIN_COVER ? (roundUp(need, MIN_COVER) / WAD).toString() : '100')
-    } else setCover(String(capacity >= 100n * WAD || capacity < MIN_COVER ? 100n : capacity / MIN_COVER * 10n)) // no loan: a sample amount the vault can back
+      setCover((c) => c || (need > MIN_COVER ? (roundUp(need, MIN_COVER) / WAD).toString() : '100')) // typed before the data loaded: keep it
+    } else setCover((c) => c || String(capacity >= 100n * WAD || capacity < MIN_COVER ? 100n : capacity / MIN_COVER * 10n)) // no loan: a sample amount the vault can back
   }, [price, liq, me, account, strike, minStrike, maxStrike, capacity, prefill, chain.expiry])
 
   const autoRepay = wantRepay && !me.smartAccount // smart accounts can't sign Mezo's ECDSA repay
@@ -579,7 +584,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
   const [shown, setShown] = useState(12)
   const [history, setHistory] = useState(PAYUNG === ADDR.payung ? undefined : null) // dev override: deployment block unknown
   const wei = parseAmount(amount)
-  const sharePrice = chain.supply ? (Number(chain.nav) / Number(chain.supply)) * 1e6 : 1 // 6-decimal virtual offset
+  const sharePrice = chain.supply == null ? null : chain.supply ? (Number(chain.nav) / Number(chain.supply)) * 1e6 : 1 // 6-decimal virtual offset
   const backing = chain.balance != null ? chain.balance - chain.owed : null
   const utilization = backing ? (chain.locked * WAD) / backing : 0n
   const weekPremiums = activity?.filter((a) => a.eventName === 'PolicyBought' && a.args.expiry > nowSec()).reduce((s, a) => s + a.args.premium, 0n)
@@ -627,9 +632,9 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
       <dl className="facts">
         <div><dt>Vault value</dt><dd>{musd(chain.nav, 0)}</dd></div>
         <div><dt>Backing open cover</dt><dd>{musd(chain.locked, 0)} <small>({pct(utilization, 0)})</small></dd></div>
-        <div><dt>Premiums on open cover</dt><dd>{weekPremiums != null ? musd(weekPremiums) : '…'}</dd></div>
+        <div><dt>Premiums on open cover</dt><dd>{weekPremiums != null ? musd(weekPremiums) : activity === null ? 'explorer offline' : '…'}</dd></div>
         <div><dt>Free to withdraw</dt><dd>{musd(chain.free, 0)}</dd></div>
-        <div><dt>1 pyMUSD</dt><dd>{sharePrice.toFixed(4)} MUSD</dd></div>
+        <div><dt>1 pyMUSD</dt><dd>{sharePrice == null ? '…' : `${sharePrice.toFixed(4)} MUSD`}</dd></div>
         <div><dt>BTC volatility (on-chain)</dt><dd>{pct(chain.vol, 0)}</dd></div>
         <div><dt>Last price sample</dt><dd>{chain.observedAt == null ? '…' : chain.observedAt === 0n ? 'none yet' : ago(chain.observedAt)}</dd></div>
       </dl>

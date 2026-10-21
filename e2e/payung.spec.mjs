@@ -111,6 +111,37 @@ test.describe('without a wallet', () => {
     expect(await frame.getByText('Open an umbrella').count()).toBe(0)
   })
 
+  test('says so when Mezo RPC or explorer is down, and recovers', async ({ page }) => {
+    // RPC down: a banner, and no made-up numbers (the share price stays unknown).
+    await page.route(/rpc\.test\.mezo\.org/, (r) => r.abort())
+    await page.goto('./')
+    await expect(page.getByRole('alert')).toContainText("Can't reach Mezo's RPC", { timeout: 40_000 })
+    await page.getByRole('button', { name: 'Earn by underwriting' }).click()
+    await expect(page.locator('.facts div', { hasText: '1 pyMUSD' }).locator('dd')).toHaveText('…')
+    // Back up: the next refresh clears the banner.
+    await page.unroute(/rpc\.test\.mezo\.org/)
+    await expect(page.getByRole('alert')).toHaveCount(0, { timeout: 40_000 })
+    await expect(page.locator('.facts div', { hasText: '1 pyMUSD' }).locator('dd')).toHaveText(/^\d\.\d{4} MUSD$/)
+
+    // Explorer down: premiums say why they're missing instead of loading forever.
+    await page.route(/api\.explorer\.test\.mezo\.org/, (r) => r.abort())
+    await page.reload()
+    await page.getByRole('button', { name: 'Earn by underwriting' }).click()
+    await expect(page.locator('.facts div', { hasText: 'Premiums on open cover' }).locator('dd')).toHaveText('explorer offline', { timeout: 30_000 })
+  })
+
+  test('a cover amount typed before the vault loads is kept', async ({ page }) => {
+    let release
+    const gate = new Promise((r) => (release = r))
+    await page.route(/rpc\.test\.mezo\.org/, async (r) => (await gate, r.continue()))
+    await page.goto('./')
+    await page.getByLabel('Cover amount (MUSD)').fill('40')
+    release()
+    await expect(page.locator('.gauge-col svg')).toBeVisible({ timeout: 40_000 })
+    await expect(page.locator('.quote strong')).toHaveText(/MUSD/, { timeout: 30_000 })
+    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('40')
+  })
+
   test('fits a phone screen without sideways scrolling', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 800 })
     await page.goto('./')
