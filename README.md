@@ -53,6 +53,7 @@ underwriters ──MUSD──▶ Payung vault (ERC-4626) ◀──premium── 
 - **`BorrowerOperationsSignatures.repayMUSDWithSignature`**: the payout lands inside the trove without the borrower being online. The vault never owns the trove. The app and keeper dry-run that exact call (an `eth_call` from the vault) to show whether a payout will reach the trove.
 - **Recovery-mode-aware liquidation line:** the app reads `TroveManager.getEntireDebtAndColl`, `getTCR` and `checkRecoveryMode`. It shows the price at which a trove really becomes liquidatable: 110%, or 150% once the whole system would fall into recovery mode first (recovery starts at `price × 150% / TCR`). It then suggests a strike just above that line and a cover that lifts the trove back to 150%.
 - **Sorted-trove hints:** the keeper computes `HintHelpers.getApproxHint` + `SortedTroves.findInsertPosition` for the post-repay NICR.
+- **Multicall3 on Mezo testnet** (`0xcA11…CA11`, deployed at block 3,669,328): the app and the keeper batch their reads into one `eth_call`. An app refresh went from 21 RPC requests to 5 while also reading every sold strike of every live week.
 - **Epochs match Mezo Earn:** weekly expiry at Thursday 00:00 UTC.
 - **Smart accounts:** Mezo checks repay signatures with plain ECDSA, so smart accounts (such as Mezo Passport's Bitcoin-wallet accounts) can't pre-sign. The app detects contract accounts and pays them to the wallet instead.
 
@@ -98,8 +99,9 @@ cd contracts && slither src/Payung.sol --config-file slither.config.json   # sta
   - **Underwriting and account switch.** It deposits and withdraws, and handles a wallet account switch.
   - **A real touch, through the UI** (`e2e/touch.spec.mjs`). It runs an anvil fork of Mezo testnet holding the deployed vault and the real MUSD system, and swaps only `PriceFeed`'s code for one that returns a set price, because anvil can't run Mezo's oracle precompile. The test sets BTC $500 under the policy's strike. It re-signs auto-repay if a past Mezo action used up the nonce. Then it clicks **Trigger it and earn** and checks the caller received exactly the reward. Finally it clicks **Pay out now** and checks the trove's debt fell by the cover.
   - **The keeper on its own** (same file). It runs the real `keeper/keeper.mjs --once` against the fork as an outside account, after the price dips under the highest live strike. Then it checks that every expiry selling that strike was triggered, that the keeper got exactly the trigger rewards, and that every policy on it was paid: into the loan when its signature still holds, otherwise into the wallet. The fork is reverted afterwards, so the UI test starts clean.
-- **Unit tests for the payout decision** (`shared/mezo.test.mjs`, `npm run test:unit`, in CI). A claim can't be redone, so only a real revert may send a payout to the wallet. An RPC timeout must throw so the keeper retries. Two live checks read Mezo's explorer: the receipt fallback and the whole-history log reader.
-  - **Read-only checks** (run in CI): no-wallet state, phone width without sideways scroll, keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
+- **Unit tests for the payout decision** (`shared/mezo.test.mjs`, `npm run test:unit`, in CI). A claim can't be redone, so only a real revert may send a payout to the wallet. An RPC timeout must throw so the keeper retries. Three live checks: Mezo's explorer receipt fallback, the whole-history log reader, and Multicall3 batching (one HTTP request, same answers as direct reads).
+  - **Renewal links** (read-only): a link with an out-of-range strike moves to the nearest allowed one and says so, a later expiry selects that week, and junk parameters are ignored.
+  - **Read-only checks** (run in CI): the stress-test table's running totals, paging older activity, no-wallet state, phone width without sideways scroll, keyboard focus, an axe-core WCAG 2.1 AA audit of every tab (0 violations), and no page errors.
 
 CI ([`.github/workflows/test.yml`](.github/workflows/test.yml)) runs unit, fuzz, invariant and fork tests, Slither, lint and the read-only e2e suite on every push.
 
@@ -114,6 +116,8 @@ The tests found and fixed real bugs:
 - The 1% premium slippage bound was too tight: a 0.05% BTC tick during the approval moved a near strike's premium 1.2%, so buys reverted "premium moved" on the live testnet. The bound is now 3%; the contract still charges the actual premium.
 - Quote requests raced on a slow RPC: an older answer (another strike or period) could land after the newer one, so the button offered a premium for different inputs and the buy reverted "premium moved". A quote now only counts for the exact inputs on screen, re-quotes when a volatility sample lands, and is re-read right before signing.
 - "Premiums on open cover" and the activity feed read the explorer's newest 50 logs. The keeper's 15-minute volatility samples pushed cover sales off that page within hours, so the figure would have quietly shrunk. Both now come from the explorer's Etherscan-style `getLogs`, one event at a time, over the vault's whole life.
+- A strike BTC had already touched in a cover period could still be picked: the contract's `quote` doesn't check it, so the app showed a premium and the buy reverted "strike already touched" after the approval. The app now reads every sold strike and blocks touched ones (and a 33rd new strike in a full period). The fork e2e test lets BTC recover above a touched strike and checks the warning.
+- Several reverts showed raw, including the races with the keeper: triggering a strike someone else just triggered, or paying cover the keeper just paid. Each now has a plain explanation.
 - A strike under the loan's liquidation line was accepted silently, though Mezo would refuse the repay there. The app now warns, and the e2e test checks the warning.
 
 ## Run it
@@ -140,7 +144,9 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 - **Your earnings.** Position value + withdrawn − deposited, from your own `Deposit`/`Withdraw` events.
 - **Price freshness and loan health.** "BTC now" shows when Mezo's oracle precompile (`PriceFeed.oracle()`, `latestRoundData().updatedAt`) last updated. Your collateral ratio and how far BTC sits above your liquidation line.
 - **Paused sales.** If the owner pauses new cover, a banner says so and buying is disabled; everything else keeps working.
-- **Calendar reminder.** Each active policy has an **Add to calendar** link: an `.ics` event at expiry with an alarm a day before.
+- **Calendar reminder.** Each active policy has an **Add to calendar** link: an `.ics` event at expiry with an alarm a day before and a renewal link (RFC 5545 escaping and line folding).
+- **Renew in one click.** **Renew for the next week** (or **Buy again** for expired cover) opens Protect with the same strike and cover for the week after; a renewal link (`?strike=&cover=&expiry=`) does the same. If BTC moved and the old strike is outside today's 5–30% band, the nearest one is picked and the app says so.
+- **If BTC falls (stress test).** For each strike the vault sold, how much it pays in total if BTC falls that far before the cover ends, and the share of the vault, from the vault's own strike book.
 - **My cover.** Per-policy auto-repay health from a dry-run of Mezo's repay, with a one-click re-sign and **Pay out now** for touched cover.
 - **Anyone can keep.** Touched strikes show a **Trigger it and earn** button with the reward. The underwriter view shows when the price was last sampled, so a stalled keeper is visible.
 - **Payout preview.** The Protect tab shows your collateral ratio at the strike, before and after the payout.

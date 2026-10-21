@@ -15,11 +15,13 @@ const CCR = 150n // in recovery mode (system ratio under 150%) loans under 150% 
 const TARGET_CR = 150n // cover sized to lift the trove back to 150% at the strike
 const WEEK = 604800n
 const MAX_WEEKS = 4 // the contract sells cover to this week's expiry or up to 3 weeks after
+const MAX_STRIKES = 32 // per expiry, as in the contract
 const SLIPPAGE = 103n // accept a premium up to 3% above the quote: near strikes move ~25x as much as BTC
 const ALERT_BAND = 103n // notify when BTC is within 3% of an active strike
 const EXPLORER = mezoTestnet.blockExplorers.default.url
 // VITE_MEZO_RPC points the app at another node, e.g. the anvil fork the touch e2e test runs.
-const pub = createPublicClient({ chain: mezoTestnet, transport: http(import.meta.env.VITE_MEZO_RPC, { timeout: 30_000 }) }) // slow RPCs exist; viem defaults to 10 s
+// batch.multicall: reads issued together go to Mezo as one Multicall3 eth_call instead of dozens.
+const pub = createPublicClient({ chain: mezoTestnet, batch: { multicall: true }, transport: http(import.meta.env.VITE_MEZO_RPC, { timeout: 30_000 }) }) // slow RPCs exist; viem defaults to 10 s
 
 const usd = (v, d = 0) => (v == null ? '…' : '$' + Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }))
 const musd = (v, d = 2) => (v == null ? '…' : Number(formatUnits(v, 18)).toLocaleString('en-US', { maximumFractionDigits: d }) + ' MUSD')
@@ -45,6 +47,16 @@ const parseAmount = (s) => {
     return null // not a number
   }
 }
+/** A renewal link (?strike=75000&cover=500&expiry=1793433600), as written into calendar reminders. */
+function linkPrefill() {
+  const q = new URLSearchParams(location.search)
+  const strike = /^\d+$/.test(q.get('strike') ?? '') ? BigInt(q.get('strike')) * WAD : undefined
+  if (!strike || strike % STEP) return undefined
+  const cover = /^\d+(\.\d+)?$/.test(q.get('cover') ?? '') ? q.get('cover') : undefined
+  const expiry = /^\d+$/.test(q.get('expiry') ?? '') ? BigInt(q.get('expiry')) : undefined
+  return { strike, cover, expiry }
+}
+const renewLink = (p) => `${location.origin}${location.pathname}?strike=${p.strike / WAD}&cover=${formatUnits(p.cover, 18)}&expiry=${p.expiry + WEEK}`
 const txLink = (hash) => <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer">View transaction</a>
 
 const REVERTS = {
@@ -52,6 +64,15 @@ const REVERTS = {
   'Payung: vault capacity': 'The vault cannot back that much cover right now. Lower the cover amount.',
   'Payung: sales closed': 'Cover ending this week stops selling an hour before expiry. Pick a longer cover period.',
   'Payung: strike out of range': 'BTC moved and the strike is no longer 5–30% below the price. Pick the strike again.',
+  'Payung: strike above spot': 'BTC fell below that strike while you were confirming. Pick the strike again.',
+  'Payung: strike already touched': 'BTC already touched that strike in this cover period, so it no longer sells. Pick another strike or period.',
+  'Payung: too many strikes': 'This cover period already sells its maximum of 32 strikes. Pick a strike someone already bought, or another period.',
+  'Payung: cover too small': 'The smallest cover is 10 MUSD.',
+  'Payung: epoch over': 'That cover period has ended.',
+  // Races with the keeper or another user: someone got there first.
+  'Payung: nothing to trigger': 'Someone else triggered that strike first.',
+  'Payung: not touched': 'BTC moved back above the strike before your trigger landed.',
+  'Payung: already paid': 'This cover has already been paid out (the keeper got there first).',
   'PriceFeed: Oracle is stale.': 'The Mezo price feed is stale right now. Try again in a minute.',
 }
 function explain(e) {
@@ -96,6 +117,7 @@ export default function App() {
   const [me, setMe] = useState({})
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState()
+  const [prefill, setPrefill] = useState(linkPrefill)
   const [alerts, setAlerts] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted')
   const alerted = useRef(new Set())
 
@@ -149,18 +171,18 @@ export default function App() {
       price ? readM(ADDR.troveManager, 'getTCR', [price]) : null,
       readP('lastObservedAt'), readP('paused'),
     ])
-    // Strikes BTC is at or under that nobody has triggered yet, in every live expiry:
-    // anyone can trigger them and earn the reward.
-    const touchable = []
-    for (let w = 0n; price && w < BigInt(MAX_WEEKS); w++) {
-      const e = expiry + w * WEEK
-      for (const strike of await readP('strikeList', [e])) {
-        if (price > strike) continue
-        const [cover, triggered] = await readP('strikes', [e, strike])
-        if (!triggered) touchable.push({ expiry: e, strike, cover, reward: await readP('triggerReward', [cover]) })
-      }
-    }
-    setChain({ price, priceAt: round?.[3], nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, paused, touchable })
+    // Every strike sold in every live expiry (multicall makes this one round trip per step).
+    const expiries = Array.from({ length: MAX_WEEKS }, (_, w) => expiry + BigInt(w) * WEEK)
+    const lists = await Promise.all(expiries.map((e) => readP('strikeList', [e])))
+    const strikes = await Promise.all(expiries.flatMap((e, i) => lists[i].map(async (strike) => {
+      const [cover, triggered] = await readP('strikes', [e, strike])
+      return { expiry: e, strike, cover, triggered }
+    })))
+    // Strikes BTC is at or under that nobody has triggered yet: anyone can trigger them and earn the reward.
+    const touchable = await Promise.all(strikes.filter((s) => price && price <= s.strike && !s.triggered)
+      .map(async (s) => ({ ...s, reward: await readP('triggerReward', [s.cover]) })))
+    const full = new Set(expiries.filter((_, i) => lists[i].length >= MAX_STRIKES))
+    setChain({ price, priceAt: round?.[3], nav, free, capacity, locked, expiry, supply, vol, maxUtil, balance, owed, recovery, tcr, observedAt, paused, touchable, strikes, full })
     if (!account) return
     const [debtColl, status, bal, code, shares, ids] = await Promise.all([
       readM(ADDR.troveManager, 'getEntireDebtAndColl', [account]),
@@ -322,9 +344,12 @@ export default function App() {
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
       {notice && <p className={`banner ${notice.kind}`} role="status">{notice.text} {notice.hash && txLink(notice.hash)}</p>}
 
-      {tab === 'protect' && <Protect key={account} {...ctx} />}
+      {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
-      {tab === 'policies' && <Policies {...ctx} alerts={alerts} enableAlerts={enableAlerts} />}
+      {tab === 'policies' && <Policies {...ctx} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
+        setPrefill({ strike: p.strike, cover: formatUnits(p.cover, 18), expiry: p.expiry + WEEK })
+        setTab('protect')
+      }} />}
 
       <footer>
         Mezo testnet · settles on Mezo's MUSD price feed · <a href={`${EXPLORER}/address/${PAYUNG}`} target="_blank" rel="noreferrer">vault contract</a> · <a href="https://github.com/PugarHuda/payung" target="_blank" rel="noreferrer">source</a>
@@ -333,9 +358,10 @@ export default function App() {
   )
 }
 
-function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite }) {
+function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, canWrite, prefill }) {
   const { price, capacity, vol, tcr } = chain
   const [weeks, setWeeks] = useState(1)
+  const [moved, setMoved] = useState() // a renewal's old strike, when today's band no longer allows it
   const expiry = chain.expiry ? chain.expiry + BigInt(weeks - 1) * WEEK : undefined
   const { liq, viaRecovery, recoveryAt } = me.hasTrove ? liquidationPrice(me, price, tcr) : {}
   const minStrike = price ? roundUp((price * 70n) / 100n, STEP) : null
@@ -348,17 +374,22 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   const [lastQuote, setQuote] = useState()
 
   // Default: umbrella opens a little above the liquidation line, cover lifts the trove to 150%.
+  // A renewal (Renew button or a calendar link) starts from the old policy's strike, cover and next week.
   useEffect(() => {
-    if (strike || !price || capacity == null || (account && me.hasTrove === undefined)) return
-    let s = liq ? roundUp((liq * 108n) / 100n, STEP) : ((price * 90n) / 100n / STEP) * STEP
+    if (strike || !price || !chain.expiry || capacity == null || (account && me.hasTrove === undefined)) return
+    let s = prefill?.strike ?? (liq ? roundUp((liq * 108n) / 100n, STEP) : ((price * 90n) / 100n / STEP) * STEP)
     if (s < minStrike) s = minStrike
     if (s > maxStrike) s = maxStrike
     setStrike(s)
-    if (me.hasTrove) {
+    if (prefill?.strike && s !== prefill.strike) setMoved(prefill.strike)
+    const w = prefill?.expiry ? Number((prefill.expiry - chain.expiry) / WEEK) + 1 : 1
+    if (w >= 1 && w <= MAX_WEEKS) setWeeks(w)
+    if (prefill?.cover) setCover(prefill.cover)
+    else if (me.hasTrove) {
       const need = me.debt - (me.coll * s * 100n) / TARGET_CR / WAD
       setCover(need > MIN_COVER ? (roundUp(need, MIN_COVER) / WAD).toString() : '100')
     } else setCover(String(capacity >= 100n * WAD || capacity < MIN_COVER ? 100n : capacity / MIN_COVER * 10n)) // no loan: a sample amount the vault can back
-  }, [price, liq, me, account, strike, minStrike, maxStrike, capacity])
+  }, [price, liq, me, account, strike, minStrike, maxStrike, capacity, prefill, chain.expiry])
 
   const autoRepay = wantRepay && !me.smartAccount // smart accounts can't sign Mezo's ECDSA repay
   const coverWei = parseAmount(cover)
@@ -376,6 +407,10 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   // Until the quote for the inputs on screen arrives, there is none (no buying on an older one).
   const quote = lastQuote && lastQuote.expiry === expiry && lastQuote.strike === strike && lastQuote.cover === coverWei ? lastQuote : undefined
   const tooBig = capacity != null && coverWei > capacity
+  // The contract refuses a strike BTC already touched this period, and a 33rd new strike in one period.
+  const sold = chain.strikes?.find((s) => s.expiry === expiry && s.strike === strike)
+  const touched = !!sold?.triggered
+  const noRoom = !sold && !!chain.full?.has(expiry)
   const cantPay = !!quote && me.bal != null && me.bal < quote.premium
   const leavesTooLittle = me.hasTrove && autoRepay && !!coverWei && me.debt - coverWei < 2000n * WAD
   // Mezo only accepts a repay that leaves the loan at or above 110% at that price; below it the
@@ -444,6 +479,9 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
             aria-valuetext={strike ? usd(strike) : undefined}
           />
           <strong className="big">{usd(strike)}{quote && <small> · {(Number(quote.distance) / 100).toFixed(1)}% below now</small>}</strong>
+          {moved && <em className="hint">Your previous strike, {usd(moved)}, is outside today's range of 5–30% below BTC, so the nearest one is picked.</em>}
+          {touched && <em className="warn">BTC already touched {usd(strike)} in this cover period, so it no longer sells. Pick another strike or period.</em>}
+          {noRoom && <em className="warn">This cover period already sells its maximum of 32 strikes. Pick one of them or another period.</em>}
         </label>
 
         <fieldset className="field weeks">
@@ -499,7 +537,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
         {account ? (
-          <button className="primary wide" disabled={!canWrite || !quote || tooBig || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
+          <button className="primary wide" disabled={!canWrite || !quote || tooBig || touched || noRoom || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
             {busy === 'buy' ? 'Opening umbrella…' : `Buy cover for ${quote ? musd(quote.premium) : '…'}`}
           </button>
         ) : (
@@ -518,6 +556,7 @@ const VAULT_EVENTS = ['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit'
 function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, canWrite }) {
   const [amount, setAmount] = useState('')
   const [activity, setActivity] = useState()
+  const [shown, setShown] = useState(12)
   const [history, setHistory] = useState(PAYUNG === ADDR.payung ? undefined : null) // dev override: deployment block unknown
   const wei = parseAmount(amount)
   const sharePrice = chain.supply ? (Number(chain.nav) / Number(chain.supply)) * 1e6 : 1 // 6-decimal virtual offset
@@ -621,20 +660,54 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
         <button className="primary" onClick={connect}>Connect wallet to deposit</button>
       )}
 
+      <Exposure chain={chain} />
+
       <h2>Vault activity</h2>
       {activity === undefined && <p className="lede">Loading from the Mezo explorer…</p>}
       {activity === null && <p className="lede">The Mezo explorer API is not answering. See the <a href={`${EXPLORER}/address/${PAYUNG}`} target="_blank" rel="noreferrer">vault on the explorer</a>.</p>}
       {activity?.length === 0 && <p className="lede">No activity yet.</p>}
       {activity?.length > 0 && (
         <ul className="activity">
-          {activity.slice(0, 12).map((a) => (
+          {activity.slice(0, shown).map((a) => (
             <li key={`${a.transactionHash}-${a.logIndex}`}>
               <span>{describe(a)}</span> <a href={`${EXPLORER}/tx/${a.transactionHash}`} target="_blank" rel="noreferrer">{ago(BigInt(a.timestamp))}</a>
             </li>
           ))}
         </ul>
       )}
+      {activity?.length > shown && <button className="tab" onClick={() => setShown((n) => n + 24)}>Show older ({activity.length - shown} more)</button>}
     </main>
+  )
+}
+
+/** Stress test from the vault's own strike book: what it pays if BTC falls to each sold strike
+ *  before the cover on it ends. A fall touches every strike above it too, so the payouts add up. */
+function Exposure({ chain }) {
+  const open = chain.strikes?.filter((s) => !s.triggered && s.cover > 0n && s.expiry > nowSec())
+  if (!open || !chain.price) return null
+  if (!open.length) return <p className="lede">No open cover right now, so a BTC fall costs the vault nothing.</p>
+  const byStrike = new Map()
+  for (const s of open) byStrike.set(s.strike, (byStrike.get(s.strike) ?? 0n) + s.cover)
+  const rows = [...byStrike].sort(([a], [b]) => (b > a ? 1 : -1)).reduce((acc, [strike, cover]) => [...acc, { strike, cover, paid: (acc.at(-1)?.paid ?? chain.owed ?? 0n) + cover }], []) // owed: touched, waiting to be paid
+  return (
+    <>
+      <h2>If BTC falls</h2>
+      <p className="lede">What the vault pays if BTC touches each strike it has sold, before that cover ends. A fall passes every strike above it, so each row includes the ones above{chain.owed > 0n && <>, plus {musd(chain.owed, 0)} already owed on touched strikes</>}.</p>
+      <table className="exposure">
+        <thead><tr><th>BTC falls to</th><th>Drop from now</th><th>Cover at this strike</th><th>Vault pays in total</th><th>Share of vault</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.strike}>
+              <td>{usd(r.strike)}</td>
+              <td>−{((1 - Number(r.strike) / Number(chain.price)) * 100).toFixed(1)}%</td>
+              <td>{musd(r.cover, 0)}</td>
+              <td>{musd(r.paid, 0)}</td>
+              <td>{chain.nav ? `${((Number(r.paid) / Number(chain.nav)) * 100).toFixed(1)}%` : '…'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   )
 }
 
@@ -654,7 +727,7 @@ function describe({ eventName, args }) {
   }
 }
 
-function Policies({ me, account, busy, run, write, signRepay, connect, canWrite, alerts, enableAlerts }) {
+function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, alerts, enableAlerts, renew }) {
   if (!account) return <main><button className="primary" onClick={connect}>Connect wallet to see your cover</button></main>
   const list = me.policies ?? []
 
@@ -703,6 +776,9 @@ function Policies({ me, account, busy, run, write, signRepay, connect, canWrite,
                   <td>{musd(p.cover, 0)}</td>
                   <td>
                     {date(p.expiry)}{p.live && !p.triggered && <small> · {left(p.expiry)} left <a href={calendar(p)} download={`payung-cover-${p.id}.ics`}>Add to calendar</a></small>}
+                    {!p.claimed && !p.triggered && chain.expiry && p.expiry + WEEK < chain.expiry + BigInt(MAX_WEEKS) * WEEK && (
+                      <> <button className="small" onClick={() => renew(p)}>{p.live ? 'Renew for the next week' : 'Buy again'}</button></>
+                    )}
                   </td>
                   <td>
                     {!p.autoRepay ? 'Wallet' : !p.live ? 'Loan' : p.problem === undefined ? 'Loan (checking the repay…)' : p.problem ? (
@@ -735,10 +811,10 @@ function calendar(p) {
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Payung//Cover//EN', 'BEGIN:VEVENT',
     `UID:payung-${PAYUNG}-${p.id}`, `DTSTAMP:${stamp(nowSec())}`, `DTSTART:${stamp(p.expiry)}`, `DTEND:${stamp(p.expiry)}`,
     `SUMMARY:${`Payung cover ends (${usd(p.strike)} strike, ${musd(p.cover, 0)})`.replace(/[,;\\]/g, '\\$&')}`, // RFC 5545 text escaping
-    `DESCRIPTION:Your liquidation cover ends now. Renew at ${location.origin}${location.pathname}`,
+    `DESCRIPTION:Your liquidation cover ends now. Renew it for the next week: ${renewLink(p)}`,
     'BEGIN:VALARM', 'TRIGGER:-P1D', 'ACTION:DISPLAY', 'DESCRIPTION:Payung cover ends tomorrow', 'END:VALARM',
     'END:VEVENT', 'END:VCALENDAR',
-  ].join('\r\n')
+  ].map((l) => l.match(/.{1,74}/g).join('\r\n ')).join('\r\n') // RFC 5545: fold lines over 75 octets
   return `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`
 }
 

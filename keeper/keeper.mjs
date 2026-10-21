@@ -10,7 +10,7 @@ import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, wa
 const payung = process.env.PAYUNG ?? ADDR.payung
 const account = privateKeyToAccount(process.env.KEEPER_KEY)
 const rpc = http(process.env.MEZO_RPC, { timeout: 60_000 }) // unset: Mezo testnet's public RPC; a repay dry-run can take a while
-const pub = createPublicClient({ chain: mezoTestnet, transport: rpc })
+const pub = createPublicClient({ chain: mezoTestnet, batch: { multicall: true }, transport: rpc }) // parallel reads -> one Multicall3 eth_call
 const wallet = createWalletClient({ account, chain: mezoTestnet, transport: rpc })
 const read = (functionName, args = []) => pub.readContract({ address: payung, abi: payungAbi, functionName, args })
 const ZERO = '0x0000000000000000000000000000000000000000'
@@ -36,18 +36,18 @@ async function tick() {
   ])
 
   // A touch hits every live expiry that sold the strike; each is its own trigger (and reward).
-  for (let w = 0n; w < weeks; w++) {
-    const expiry = first + w * 604800n
-    for (const strike of await read('strikeList', [expiry])) {
-      const [cover, triggered] = await read('strikes', [expiry, strike])
-      if (!triggered && cover > 0n && price <= strike) await send('trigger', [expiry, strike])
-    }
-  }
+  const expiries = Array.from({ length: Number(weeks) }, (_, w) => first + BigInt(w) * 604800n)
+  const lists = await Promise.all(expiries.map((e) => read('strikeList', [e])))
+  const touched = lists.flatMap((list, i) => list.filter((strike) => price <= strike).map((strike) => [expiries[i], strike]))
+  const states = await Promise.all(touched.map((args) => read('strikes', args)))
+  for (const [i, [cover, triggered]] of states.entries()) if (!triggered && cover > 0n) await send('trigger', touched[i])
 
   const count = await read('policyCount')
   let allPaidBelow = scanFrom
-  for (let id = scanFrom; id < count; id++) {
-    const p = await read('policy', [id])
+  const ids = Array.from({ length: Number(count - scanFrom) }, (_, i) => scanFrom + BigInt(i))
+  const policies = await Promise.all(ids.map((id) => read('policy', [id])))
+  for (const [i, p] of policies.entries()) {
+    const id = ids[i]
     if (p.claimed) {
       if (allPaidBelow === id) allPaidBelow = id + 1n
       continue

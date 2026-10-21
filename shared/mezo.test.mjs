@@ -49,3 +49,19 @@ test('explorerLogs reads every PolicyBought since deployment', async () => {
   assert.ok(logs.every((l) => l.eventName === 'PolicyBought' && l.args.premium > 0n && l.timestamp > 0))
   assert.equal(logs[0].transactionHash, '0xa424f08e0c5ec3625a67798a0d84d815d572a502468b25b56a9201f4c41c007c') // first sale on v4
 })
+
+// Live check: Multicall3 on Mezo testnet answers batched reads in one eth_call, matching direct reads.
+test('reads batch through Mezo testnet Multicall3', async () => {
+  const { createPublicClient, http } = await import('viem')
+  const { mezoTestnet, payungAbi, ADDR } = await import('./mezo.js')
+  let posts = 0
+  const transport = http(undefined, { onFetchRequest: () => { posts++ } })
+  const batched = createPublicClient({ chain: mezoTestnet, batch: { multicall: true }, transport })
+  const blockNumber = await batched.getBlockNumber()
+  posts = 0
+  const names = ['currentExpiry', 'policyCount', 'maxUtilization', 'totalLocked']
+  const viaMulticall = await Promise.all(names.map((n) => batched.readContract({ address: ADDR.payung, abi: payungAbi, functionName: n, blockNumber })))
+  assert.equal(posts, 1)
+  const direct = createPublicClient({ chain: mezoTestnet, transport: http() })
+  assert.deepEqual(viaMulticall, await Promise.all(names.map((n) => direct.readContract({ address: ADDR.payung, abi: payungAbi, functionName: n, blockNumber }))))
+})

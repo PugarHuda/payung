@@ -171,5 +171,18 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     const [, principalAfter, interestAfter] = await fork.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [me] })
     const repaid = principalBefore + interestBefore - (principalAfter + interestAfter)
     expect(repaid > policy.cover - 10n ** 15n && repaid <= policy.cover).toBe(true) // the trove's debt fell by the cover
+
+    // BTC recovers to ~10% above the touched strike. That strike stays closed for this expiry: the
+    // app says so before anyone signs anything (the contract would revert "strike already touched").
+    const recovered = Math.round(strikeUsd / 0.9)
+    await setPrice(String(recovered))
+    await page.getByRole('button', { name: 'Protect my loan' }).click()
+    await expect(page.getByRole('img', { name: new RegExp(`BTC \\$${recovered.toLocaleString('en-US')}`) })).toBeVisible({ timeout: 60_000 })
+    const current = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'currentExpiry' })
+    const week = Number((policy.expiry - current) / 604800n) + 1
+    await page.locator('.seg label', { hasText: week === 1 ? 'This week' : `${week} weeks` }).click()
+    await page.getByRole('slider').fill(String(strikeUsd / 1000))
+    await expect(page.getByText(`BTC already touched $${strikeUsd.toLocaleString('en-US')} in this cover period`)).toBeVisible()
+    await expect(page.getByRole('button', { name: /Buy cover/ })).toBeDisabled()
   })
 })

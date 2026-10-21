@@ -28,8 +28,32 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.activity')).not.toContainText('Volatility sample')
     await expect(page.getByText(/capped at 50% of the vault/)).toBeVisible()
     // Archive reads of the share price since deployment: 25 samples, starting at 1 MUSD.
+    // Stress test from the vault's strike book: running totals, each row at least the one above.
+    const totals = await page.locator('table.exposure tbody td:nth-child(4)').allInnerTexts()
+    const nums = totals.map((t) => Number(t.replace(/[^\d.]/g, '')))
+    expect(nums.length).toBeGreaterThan(0)
+    expect(nums).toEqual([...nums].sort((a, b) => a - b))
+    // Older events page in from the whole history.
+    const shown = await page.locator('.activity li').count()
+    await page.getByRole('button', { name: /Show older/ }).click()
+    expect(await page.locator('.activity li').count()).toBeGreaterThan(shown)
     await expect(page.locator('.history figcaption')).toContainText(/1 pyMUSD: 1\.0000 → \d\.\d{4} MUSD since launch.*at 25 past blocks/)
     expect(errors).toEqual([])
+  })
+
+  test('a renewal link prefills strike, cover and period, and ignores junk', async ({ page }) => {
+    // The next-but-one weekly expiry (Thursday 00:00 UTC), as a calendar reminder would carry it.
+    const week = 604800
+    const next = Math.ceil(Date.now() / 1000 / week) * week + week
+    await page.goto(`./?strike=1000&cover=42&expiry=${next}`)
+    await expect(page.getByText(/Your previous strike, \$1,000, is outside today's range/)).toBeVisible()
+    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('42')
+    await expect(page.locator('.seg label.on')).toHaveText('2 weeks')
+    await page.goto('./?strike=abc&cover=1e9&expiry=-1')
+    await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
+    await expect(page.locator('.seg label.on')).toHaveText('This week')
+    await expect(page.getByLabel('Cover amount (MUSD)')).not.toHaveValue('1e9')
+    await expect(page.locator('em.hint')).toHaveCount(0)
   })
 
   test('fits a phone screen without sideways scrolling', async ({ page }) => {
@@ -104,7 +128,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.getByText('The smallest cover is 10 MUSD.')).toBeVisible()
     await expect(buy).toBeDisabled()
     await cover.fill('99999999')
-    await expect(page.getByText(/The vault can back .* more right now/)).toBeVisible()
+    await expect(page.getByText(/The vault can back .* more right now|cover is fully booked/)).toBeVisible() // which one depends on what earlier runs locked
     await expect(buy).toBeDisabled()
 
     // Strike slider stays inside the 5-30% band the contract accepts.
@@ -118,17 +142,21 @@ test.describe('with a wallet on Mezo testnet', () => {
 
     // Underwrite first: withdraw 20 MUSD of free liquidity (funds the wallet for the run), then
     // deposit back, which also adds backing capacity for the cover bought next. Every run locks
-    // another 25 MUSD for two weeks, so deposit enough that 30 MUSD of capacity is free (50% of a deposit).
+    // another 10 MUSD for two weeks, so deposit enough that 15 MUSD of capacity is free (50% of a deposit).
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     const amountBox = page.getByLabel('Amount (MUSD)')
+    // Read capacity now, while the chain is settled: right after a transaction a lagging RPC node
+    // can still answer with the old value. Withdrawing 20 MUSD takes 10 off it.
+    const capacity = Number(await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })) / 1e18 - 10
     await amountBox.fill('20')
     await page.getByRole('button', { name: 'Withdraw' }).click()
     await expect(page.getByRole('status')).toContainText('Withdrew 20 MUSD.', { timeout: 180_000 })
-    const capacity = Number(await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })) / 1e18
-    const topUp = Math.max(10, Math.ceil(((30 - capacity) * 2) / 10) * 10)
+    const topUp = Math.max(10, Math.ceil(((15 - capacity) * 2) / 10) * 10)
     await amountBox.fill(String(topUp))
     await page.getByRole('button', { name: 'Deposit' }).click()
     await expect(page.getByRole('status')).toContainText(`Deposited ${topUp} MUSD.`, { timeout: 180_000 })
+    // Mezo's load-balanced RPC can lag a block: wait until the deposit shows as capacity.
+    await expect.poll(async () => Number(await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })) / 1e18, { timeout: 60_000 }).toBeGreaterThanOrEqual(10)
     // Earnings come from this wallet's Deposit/Withdraw events since the vault launched.
     await expect(page.getByText(/Earned so far: [+−][\d.,]+ MUSD on [\d,]+ MUSD deposited/)).toBeVisible({ timeout: 60_000 })
     await page.getByRole('button', { name: 'Protect my loan' }).click()
@@ -143,7 +171,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.getByText(/Mezo would refuse the repay/)).toBeHidden()
 
     // Cover period: a longer term moves the expiry and costs more (more time for a touch).
-    await cover.fill('25')
+    await cover.fill('10')
     // Compare the rate (% of cover): it doesn't depend on which cover amount the last quote used.
     const rateOf = async () => Number(((await page.locator('.quote small').textContent()) ?? '').replace(/[^0-9.]/g, ''))
     // Quotes arrive async after every strike/amount change: wait until the shown rate stops moving.
@@ -168,7 +196,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     // My cover: the new policy is active and Mezo's repay dry-run passes.
     await page.getByRole('button', { name: 'My cover' }).click()
     const row = page.locator('tbody tr').first()
-    await expect(row).toContainText('25 MUSD')
+    await expect(row).toContainText('10 MUSD')
     await expect(row).toContainText('Active')
     await expect(row).toContainText('Loan, repay checked', { timeout: 120_000 })
     await expect(page.getByText(/Browser alerts are on/)).toBeVisible()
@@ -176,7 +204,17 @@ test.describe('with a wallet on Mezo testnet', () => {
     const ics = decodeURIComponent((await row.getByRole('link', { name: 'Add to calendar' }).getAttribute('href')).split(',').slice(1).join(','))
     expect(ics).toMatch(/BEGIN:VEVENT\r\n.*DTSTART:\d{8}T000000Z\r\n/s) // Thursday 00:00 UTC
     expect(ics).toContain('TRIGGER:-P1D')
-    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 25 MUSD\)/) // commas escaped per RFC 5545
+    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 10 MUSD\)/) // commas escaped per RFC 5545
+    expect(ics.split('\r\n').every((l) => l.length <= 75)).toBe(true) // long lines folded
+    const renewUrl = ics.replace(/\r\n /g, '').match(/Renew it for the next week: (\S+)/)[1]
+    expect(renewUrl).toMatch(/\?strike=\d+&cover=10&expiry=\d+$/)
+    // Renew: back on Protect with the same strike and cover, the week after this cover ends (week 3).
+    const strikeText = (await row.locator('td').first().innerText()).trim()
+    await row.getByRole('button', { name: 'Renew for the next week' }).click()
+    await expect(page.locator('.big').first()).toContainText(strikeText)
+    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('10')
+    await expect(page.locator('.seg label.on')).toHaveText('3 weeks')
+    await page.getByRole('button', { name: 'My cover' }).click()
 
     // Another Mezo signature action (a signed 1 MUSD repay) uses up the nonce: the app spots it and re-signs.
     const nonce = await w.pub.readContract({ address: ADDR.sigs, abi: mezoAbi, functionName: 'getNonce', args: [w.account.address] })

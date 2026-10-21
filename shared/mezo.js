@@ -8,6 +8,8 @@ export const mezoTestnet = defineChain({
   nativeCurrency: { name: 'Bitcoin', symbol: 'BTC', decimals: 18 },
   rpcUrls: { default: { http: ['https://rpc.test.mezo.org'] } },
   blockExplorers: { default: { name: 'Mezo Explorer', url: 'https://explorer.test.mezo.org' } },
+  // Deployed on Mezo testnet: lets a client batch its reads into one eth_call.
+  contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11', blockCreated: 3669328 } },
   testnet: true,
 })
 
