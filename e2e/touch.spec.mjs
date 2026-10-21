@@ -10,6 +10,7 @@ import { spawn, execSync } from 'node:child_process'
 import { createPublicClient, http, parseUnits, numberToHex, pad } from 'viem'
 import { installWallet } from './wallet.mjs'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi } from '../shared/mezo.js'
+import { readAlerts } from '../shared/notify.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 const RPC = 'http://127.0.0.1:8786'
@@ -19,6 +20,7 @@ const ANVIL_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f
 const ANVIL_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
 const RETURN_SLOT0 ='0x60005460005260206000f3' // runtime: return sload(0) for any call
 const procs = []
+const APP_NTFY = `payung-e2e-app-${Date.now().toString(36)}-` // the app's alerts in this run's own ntfy namespace
 
 const start = (cmd, env = {}) => {
   const p = spawn(cmd, { shell: true, stdio: 'ignore', env: { ...process.env, ...env } })
@@ -50,7 +52,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     await until(() => fork.getBlockNumber())
     await fork.request({ method: 'anvil_mine', params: ['0x1'] }) // Mezo headers lack blob-gas fields; a local block has them
     await fork.request({ method: 'anvil_setCode', params: [ADDR.priceFeed, RETURN_SLOT0] })
-    execSync('npx vite build --outDir dist-fork', { cwd: 'app', stdio: 'ignore', env: { ...process.env, VITE_MEZO_RPC: RPC } })
+    execSync('npx vite build --outDir dist-fork', { cwd: 'app', stdio: 'ignore', env: { ...process.env, VITE_MEZO_RPC: RPC, VITE_NTFY_PREFIX: APP_NTFY } })
     start('npm run preview -w app -- --outDir dist-fork --port 4784 --strictPort', { VITE_MEZO_RPC: RPC }) // CSP lets the app reach the fork
     await until(async () => (await fetch(APP)).ok)
   })
@@ -87,7 +89,10 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
       const walletBefore = await Promise.all(touched.map((p) => fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [p.holder] })))
       const keeperBefore = await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [ANVIL_ADDR] })
 
-      const out = execSync('node keeper/keeper.mjs --once', { env: { ...process.env, KEEPER_KEY: ANVIL_KEY, MEZO_RPC: RPC }, encoding: 'utf8' })
+      // Phone alerts go to real ntfy.sh, in a namespace of this run's own (not the holders' real topics).
+      const NTFY_PREFIX = `payung-e2e-${Date.now().toString(36)}-`
+      const keeperFrom = await fork.getBlockNumber()
+      const out = execSync('node keeper/keeper.mjs --once', { env: { ...process.env, KEEPER_KEY: ANVIL_KEY, MEZO_RPC: RPC, NTFY_PREFIX }, encoding: 'utf8' })
       console.log(out.trim())
 
       let reward = 0n
@@ -106,6 +111,13 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
         const toWallet = (await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [p.holder] })) - walletBefore[i]
         expect(repaid + toWallet).toBeGreaterThanOrEqual(p.cover - 10n ** 15n)
         if (p.autoRepay && !out.includes(`policy ${p.id}: repay would fail`)) expect(repaid).toBeGreaterThanOrEqual(p.cover - 10n ** 15n)
+        // The holder's phone got the payout alert, signed by the keeper, saying where the MUSD went.
+        const paidAlert = async () => (await readAlerts(p.holder, NTFY_PREFIX)).find((a) => a.tag === `paid-${ADDR.payung.toLowerCase()}-${p.id}`)
+        await expect.poll(async () => (await paidAlert())?.signer, { message: `no keeper-signed payout alert for policy ${p.id}`, timeout: 15_000 }).toBe(ANVIL_ADDR)
+        const alert = await paidAlert()
+        // A holder can have several policies on the strike, so read where this one went from its own event.
+        const [paid] = await fork.getContractEvents({ address: ADDR.payung, abi: payungAbi, eventName: 'PolicyPaid', args: { id: p.id }, fromBlock: keeperFrom })
+        expect(alert.message).toMatch(paid.args.repaidTrove ? /into your Mezo loan/ : /to your wallet/)
       }
     } finally {
       await fork.request({ method: 'evm_revert', params: [snapshot] })
@@ -163,6 +175,13 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
 
     // My cover: touched, and the holder pays it out without waiting for a keeper.
     await page.getByRole('button', { name: 'My cover' }).click()
+    // Phone alerts: the topic shown is the holder's, and a test alert really reaches ntfy.sh.
+    const topic = `${APP_NTFY}${me.toLowerCase().slice(2)}`
+    await expect(page.locator('.phone code')).toHaveText(topic)
+    await page.getByRole('button', { name: 'Send a test alert' }).click()
+    await expect(page.getByRole('status')).toContainText(`Test alert sent to ${topic}`)
+    await expect(page.locator('.alerts li', { hasText: 'Payung test alert' })).toContainText('Signed by you', { timeout: 30_000 })
+    expect((await readAlerts(me, APP_NTFY)).find((a) => a.title === 'Payung test alert').signer).toBe(me)
     await expect(row).toContainText('Touched, paying out')
     const [, principalBefore, interestBefore] = await fork.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [me] })
     await row.getByRole('button', { name: 'Pay out now' }).click()

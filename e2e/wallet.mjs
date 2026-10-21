@@ -34,6 +34,8 @@ export async function installWallet(page, key, rpc) {
         delete types.EIP712Domain
         return account.signTypedData({ domain, types, primaryType, message })
       }
+      case 'personal_sign': // [hex message, address], as MetaMask takes it
+        return account.signMessage({ message: { raw: params[0] } })
       case 'eth_sendTransaction': {
         const tx = params[0]
         return wallet.sendTransaction({ to: tx.to, data: tx.data, gas: tx.gas ? BigInt(tx.gas) : undefined, value: tx.value ? BigInt(tx.value) : 0n })

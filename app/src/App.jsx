@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPublicClient, createWalletClient, custom, http, formatUnits, parseUnits, isAddress, parseEventLogs } from 'viem'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayTypedData, repayHints, autoRepayProblem, waitForReceipt, explorerLogs, GAS } from '../../shared/mezo.js'
 import { touchChance, touchRate } from '../../shared/odds.js'
+import { NTFY, KEEPERS, notify, readAlerts, topicFor } from '../../shared/notify.js'
 import './App.css'
 
 // ?vault= override is dev-only: in a shared build a link could aim MUSD approvals at any contract.
@@ -364,7 +365,7 @@ export default function App() {
 
       {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
-      {tab === 'policies' && <Policies {...ctx} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
+      {tab === 'policies' && <Policies {...ctx} signer={{ signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
         setPrefill({ strike: p.strike, cover: formatUnits(p.cover, 18), expiry: p.expiry + WEEK })
         setTab('protect')
       }} />}
@@ -746,7 +747,14 @@ function describe({ eventName, args }) {
   }
 }
 
-function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, alerts, enableAlerts, renew }) {
+function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, alerts, enableAlerts, renew, signer }) {
+  const [phone, setPhone] = useState() // alerts on this account's ntfy topic, each with who signed it
+  const loadPhone = useCallback(() => account && readAlerts(account).then(setPhone, () => setPhone(null)), [account])
+  useEffect(() => {
+    loadPhone()
+    const t = setInterval(loadPhone, 30_000)
+    return () => clearInterval(t)
+  }, [loadPhone])
   if (!account) return <main><button className="primary" onClick={connect}>Connect wallet to see your cover</button></main>
   const list = me.policies ?? []
 
@@ -775,10 +783,41 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
       {typeof Notification !== 'undefined' && (
         <p className="lede">
           {alerts ? 'Browser alerts are on while this tab is open. You get one when BTC is within 3% of a strike and one when cover pays out.' : (
-            <button onClick={enableAlerts}>Alert me when BTC nears my strike</button>
+            <button onClick={enableAlerts}>Alert me in this tab when BTC nears my strike</button>
           )}
         </p>
       )}
+      <div className="phone">
+        <p>
+          <strong>Phone alerts, with this page closed.</strong> The keeper sends one when BTC comes within 3% of your strike and one when your cover pays out.
+          Install <a href="https://ntfy.sh" target="_blank" rel="noreferrer">ntfy</a> (Android, iOS or web) and subscribe to <code>{topicFor(account)}</code>.
+        </p>
+        <p>
+          <a href={`${NTFY}/${topicFor(account)}`} target="_blank" rel="noreferrer">Open my alerts in ntfy</a>{' '}
+          <button className="small" disabled={!canWrite || !!busy} onClick={() => run('ntfy', async () => {
+            await notify(account, { title: 'Payung test alert', message: 'Alerts about your cover will arrive here.', tag: 'test' }, signer)
+            setTimeout(loadPhone, 2000) // ntfy.sh shows a new message within a second or two
+            return { text: `Test alert sent to ${topicFor(account)}, signed by your wallet. If ntfy is subscribed, it is on your phone now.` }
+          })}>{busy === 'ntfy' ? 'Sending…' : 'Send a test alert'}</button>
+        </p>
+        <p className="fine">
+          Anyone can post to an ntfy topic, so Payung alerts are signed and never contain links or ask you to sign anything. The list below checks each one.
+        </p>
+        {phone?.length > 0 && (
+          <ul className="alerts">
+            {phone.slice(0, 5).map((a) => {
+              const keeper = KEEPERS.some((k) => k.toLowerCase() === a.signer?.toLowerCase())
+              const mine = a.signer?.toLowerCase() === account.toLowerCase()
+              return (
+                <li key={a.id}>
+                  <span className={keeper || mine ? 'pill active' : 'pill expired'}>{mine ? 'Signed by you' : keeper ? 'Signed by the Payung keeper' : 'Not from Payung, ignore it'}</span>{' '}
+                  {a.title} <small>{ago(BigInt(a.time))}</small>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
       {me.policies === undefined ? (
         <p className="lede">Reading your cover…</p>
       ) : list.length === 0 ? (
