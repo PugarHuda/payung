@@ -174,6 +174,8 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 
 ## Known limits
 
+- **Redemption risk is a warning, not cover.** We designed a cover that pays when a loan nears the front of Mezo's redemption queue and dropped it: the queue position can be moved cheaply by the buyer. Borrowing more moves your own loan forward (blockable by recording the ratio at purchase), but opening throwaway loans ahead of your own, buying cover and closing them drops the debt ahead below any threshold for the price of gas, and on-chain nothing tells "other borrowers left" from "my own loans left". Paying only when a loan is actually closed by redemption is harder to fake but tiny (anyone at the front could redeem against themselves whenever the payout beats the redemption fee). So Payung shows the queue position against Mezo's real redemption history and phones covered borrowers who come within reach, and leaves the cover for a trigger that holds up.
+
 - **Payung's relayer for Bitcoin wallets** (`api/relay.js`, a Vercel Function with its own key) pays the gas for Passport accounts. It only relays OrangeKit Safe deployments and Bitcoin-signed `execTransaction`s that call Payung, MUSD, BTC or the Mezo Pools router (see Security model), so it can be drained only of gas, and only for calls users really signed. If it runs out of testnet BTC, Bitcoin wallets can't send until someone tops it up (`GET /api/relay` shows its balance).
 
 - **Touch detection** depends on someone calling `trigger` while BTC is under the strike. Mezo's oracle exposes only the latest round, and the Pyth contract on Mezo testnet holds a months-old BTC price whose Hermes history API now needs a key, so a past dip can't be proven on-chain. The GitHub Actions keeper polls every 10 s inside each run, but GitHub starts scheduled runs on a best-effort basis (we saw none fire in the first hours), so it is a backstop, not a guarantee. `npm run keeper` polls every 5 s on any always-on machine. The trigger reward exists so outside bots watch too.
@@ -194,7 +196,7 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 ## Roadmap
 
 1. **Wave 2 (Nov 2–15):** a capped mainnet vault after an external review. (Bitcoin-wallet users through Mezo Passport are already in: their accounts are smart accounts, so their payouts go to the wallet.)
-2. **December:** redemption-risk cover that pays on the queue position the app already shows (a contract change), partner vault curators.
+2. **December:** partner vault curators, and redemption-risk cover only with a trigger that can't be gamed (see below).
 3. **Q1 2027:** cover as a module other Mezo apps can embed at borrow time.
 
 ## Team

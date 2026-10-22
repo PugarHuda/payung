@@ -8,7 +8,7 @@ import { test, expect } from '@playwright/test'
 import { createPublicClient, createWalletClient, http, parseEther, keccak256, toHex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { btcKey, installUnisat } from './btcwallet.mjs'
-import { mezoTestnet, ADDR, payungAbi, mezoAbi, waitForReceipt } from '../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, waitForReceipt } from '../shared/mezo.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 
@@ -45,10 +45,20 @@ test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
     await expect(page.getByRole('slider')).toBeEnabled()
     await page.getByRole('slider').focus()
     await page.keyboard.press('Home')
+    // Size the cover to what the vault can still back: a strike already open this period takes any
+    // cover from 10 MUSD, a new one needs 100.
+    const read = (functionName, args = []) => pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName, args })
+    const [capacity, expiry] = await Promise.all([read('coverCapacity'), read('currentExpiry')])
+    const strike = BigInt((await page.locator('.big').first().innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, '')) * 10n ** 18n
+    const open = (await read('strikeList', [expiry])).includes(strike)
+    const cover = capacity >= 100n * 10n ** 18n ? 100n : open ? capacity / 10n ** 18n : 0n
+    test.skip(cover < 10n, `the vault can back only ${capacity / 10n ** 18n} MUSD more right now`)
+    await page.getByLabel('Cover amount (MUSD)').fill(String(cover))
     const signed = () => log.filter((m) => m === 'signMessage').length
     await expect(page.locator('.quote strong')).toHaveText(/MUSD/, { timeout: 60_000 })
-    const musdHeld = await pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [safe] })
-    if (musdHeld < 10n ** 18n) { // an earlier run may have left it MUSD; otherwise it swaps BTC for the premium
+    await expect(page.getByRole('button', { name: /^Buy cover for [\d.]+ MUSD$/ })).toBeVisible() // the quote is in
+    // MUSD left from an earlier run may already pay the premium; otherwise the app offers the swap.
+    if (await page.getByText(/Borrow or buy MUSD on Mezo to pay the premium/).isVisible()) {
       await page.getByRole('button', { name: /^Swap 0\.\d+ BTC for MUSD$/ }).click({ timeout: 60_000 })
       await expect(page.getByRole('status')).toContainText('Swapped BTC for about', { timeout: 300_000 })
       expect(signed()).toBeGreaterThanOrEqual(1) // the swap (and the BTC approval) signed in Bitcoin

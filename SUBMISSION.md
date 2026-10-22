@@ -23,7 +23,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 
 **Future milestones:**
 1. Wave 2 (Nov 2–15): capped mainnet vault after an external review. a relayer with per-user rate limits and a gas budget (Bitcoin wallets already buy cover through Mezo Passport today, via Payung's own relayer).
-2. December 2026: redemption-risk cover (redemption queue position as the trigger), partner vault curators.
+2. December 2026: partner vault curators; redemption-risk cover only with a trigger that can't be gamed (a queue-position trigger can be moved with throwaway loans, so today it is a warning plus phone alert).
 3. Q1 2027: cover as an embeddable module offered at borrow time in other Mezo apps.
 
 **Team:** Pugar Huda Mantoro, solo builder (product, contracts, app). X: [@bangdropid](https://x.com/bangdropid) · LinkedIn: [pugar-huda-mantoro](https://www.linkedin.com/in/pugar-huda-mantoro) · GitHub: [PugarHuda](https://github.com/PugarHuda)
