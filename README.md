@@ -196,4 +196,4 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 
 ## Team
 
-- Pugar Huda Mantoro: solo builder (product, contracts, app) ([X](https://x.com/bangdropid) · [GitHub](https://github.com/PugarHuda))
+- Pugar Huda Mantoro: solo builder (product, contracts, app) ([X](https://x.com/bangdropid) · [LinkedIn](https://www.linkedin.com/in/pugar-huda-mantoro) · [GitHub](https://github.com/PugarHuda))
