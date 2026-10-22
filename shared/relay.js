@@ -45,7 +45,7 @@ export async function relayProblem(client, relayer, { to, data, owner } = {}) {
   try {
     await client.call({ account: relayer, to, data, gas: GAS })
   } catch (e) {
-    return `would revert: ${e.shortMessage ?? e.message}`
+    return `would revert: ${e.shortMessage ?? 'simulation failed'}`
   }
   return null
 }
