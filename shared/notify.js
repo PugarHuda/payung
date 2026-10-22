@@ -21,7 +21,7 @@ const signed = (topic, { tag, title, message }) => `Payung alert\ntopic: ${topic
 export async function notify(address, { title, message, tag, priority }, signer) {
   const topic = topicFor(address)
   const signature = await signer.signMessage({ message: signed(topic, { tag, title, message }) })
-  const res = await fetch(NTFY, { method: 'POST', body: JSON.stringify({ topic, title, message, priority, tags: ['umbrella', tag, `sig-${signature}`] }) })
+  const res = await fetch(NTFY, { method: 'POST', body: JSON.stringify({ topic, title, message, priority, tags: ['umbrella', tag, `sig-${signature}`] }), signal: AbortSignal.timeout(10_000) }) // a slow ntfy must not delay triggers
   if (!res.ok) throw new Error(`ntfy ${res.status}: ${await res.text()}`)
 }
 
@@ -29,7 +29,7 @@ export async function notify(address, { title, message, tag, priority }, signer)
  *  signed it, or null when unsigned or forged. */
 export async function readAlerts(address, prefix) {
   const topic = topicFor(address, prefix)
-  const text = await fetch(`${NTFY}/${topic}/json?poll=1&since=12h`).then((r) => r.text())
+  const text = await fetch(`${NTFY}/${topic}/json?poll=1&since=12h`, { signal: AbortSignal.timeout(10_000) }).then((r) => r.text())
   const alerts = await Promise.all(text.split('\n').filter(Boolean).map(async (line) => {
     const m = JSON.parse(line)
     const tag = m.tags?.find((t) => t !== 'umbrella' && !t.startsWith('sig-'))

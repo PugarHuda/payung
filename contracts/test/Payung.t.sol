@@ -179,8 +179,38 @@ contract PayungTest is Test {
         vault.trigger(E, 90_000e18);
         sigs.setFail(true);
         uint256 before = musd.balanceOf(alice);
+        vm.prank(alice); // the holder may take the wallet payout at once
         vault.claim(id, address(0), address(0));
         assertEq(musd.balanceOf(alice) - before, 1_000e18);
+    }
+
+    /// Anyone can call claim with the gas and hints they choose, which can make a valid repay fail.
+    /// So a stranger can't turn a failed repay into a wallet payout until FALLBACK_DELAY has passed.
+    function test_strangerCannotDivertFailedRepayToWallet() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, true);
+        feed.set(85_000e18);
+        vault.trigger(E, 90_000e18);
+        sigs.setFail(true);
+        vm.expectRevert("Payung: repay failed");
+        vault.claim(id, address(0), address(0));
+        vm.warp(block.timestamp + vault.FALLBACK_DELAY() - 1);
+        vm.expectRevert("Payung: repay failed");
+        vault.claim(id, address(0), address(0));
+        vm.warp(block.timestamp + 1);
+        uint256 before = musd.balanceOf(alice);
+        vault.claim(id, address(0), address(0)); // after the delay anyone may pay the wallet
+        assertEq(musd.balanceOf(alice) - before, 1_000e18);
+        assertEq(vault.totalOwed(), 0);
+    }
+
+    function test_newStrikeNeedsMinimumCover() public {
+        vm.prank(alice);
+        vm.expectRevert("Payung: new strike needs 100 MUSD");
+        vault.buy(E, 90_000e18, 99e18, type(uint256).max, false, 0, "");
+        _buy(alice, 90_000e18, 100e18, false);
+        // Once the strike is open, smaller cover on it sells as before.
+        vm.prank(alice);
+        vault.buy(E, 90_000e18, 10e18, type(uint256).max, false, 0, "");
     }
 
     function test_noTouchMeansCoverExpiresAndLpsKeepPremium() public {
@@ -429,7 +459,7 @@ contract PayungTest is Test {
 
     function testFuzz_vaultAlwaysSolvent(uint256 strikeK, uint256 cover, uint256 dropBps) public {
         strikeK = bound(strikeK, 70, 95);
-        cover = bound(cover, 10e18, 50_000e18);
+        cover = bound(cover, 100e18, 50_000e18);
         dropBps = bound(dropBps, 0, 5000);
         uint256 id = _buy(alice, strikeK * 1000e18, cover, false);
         feed.set(100_000e18 * (10_000 - dropBps) / 10_000);

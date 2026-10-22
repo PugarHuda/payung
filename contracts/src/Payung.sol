@@ -47,6 +47,11 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant MAX_WEEKS = 4; // cover can run to this week's expiry or up to 3 weeks after
     uint256 public constant MAX_STRIKES = 32; // per expiry: covers the 5-30% band at today's prices, bounds the NAV loop
     uint256 public constant MIN_COVER = 10e18;
+    // Opening one of an expiry's MAX_STRIKES slots takes real cover, so filling them all to lock
+    // others out costs more than dust.
+    uint256 public constant MIN_NEW_STRIKE_COVER = 100e18;
+    // A failed auto-repay pays the wallet only after this long, unless the holder claims (see claim).
+    uint256 public constant FALLBACK_DELAY = 6 hours;
     uint256 public constant BPS = 10_000;
     uint256 public constant TABLE_SIZE = 26; // one entry per 1% from 5% to 30%
     // Leaves room for the repay so a keeper cannot starve it into the fallback path.
@@ -90,6 +95,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
     mapping(address => uint256[]) internal _policiesOf;
     mapping(uint256 => mapping(uint256 => Strike)) public strikes; // expiry => strike => state
     mapping(uint256 => uint256[]) internal _strikeList; // expiry => strikes sold
+    mapping(uint256 => mapping(uint256 => uint256)) public triggeredAt; // expiry => strike => trigger time
 
     mapping(uint256 => uint256) public lockedCover; // expiry => untriggered cover (collateral locked until then)
     uint256 public totalOwed; // triggered cover not yet paid out
@@ -166,6 +172,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         Strike storage s = strikes[expiry][strike];
         require(!s.triggered, "Payung: strike already touched");
         if (s.cover == 0) {
+            require(cover >= MIN_NEW_STRIKE_COVER, "Payung: new strike needs 100 MUSD");
             require(_strikeList[expiry].length < MAX_STRIKES, "Payung: too many strikes");
             _strikeList[expiry].push(strike);
         }
@@ -207,6 +214,7 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
         _observe(price);
 
         s.triggered = true;
+        triggeredAt[expiry][strike] = block.timestamp;
         lockedCover[expiry] -= s.cover;
         totalOwed += s.cover;
 
@@ -232,6 +240,13 @@ contract Payung is ERC4626, Ownable2Step, Pausable, ReentrancyGuard {
                 return;
             } catch {
                 // Signature used/voided, trove closed, or repay would break min debt: pay the wallet.
+                // A caller can also make a valid repay fail (too little gas for a nested call, hints
+                // that send SortedTroves on a full walk), so only the holder may take the wallet
+                // payout at once; anyone else must wait FALLBACK_DELAY, during which keepers retry.
+                require(
+                    msg.sender == p.holder || block.timestamp >= triggeredAt[p.expiry][p.strike] + FALLBACK_DELAY,
+                    "Payung: repay failed"
+                );
             }
         }
         IERC20(asset()).safeTransfer(p.holder, p.cover);

@@ -123,9 +123,9 @@ export async function waitForReceipt(client, hash, { timeout = 180_000, interval
 
 /// The receipt fields Payung reads (status, block, logs), from the Blockscout API. Null while pending.
 export async function explorerReceipt(hash) {
-  const tx = await fetch(`${EXPLORER_API}/transactions/${hash}`).then((r) => (r.ok ? r.json() : null))
+  const tx = await fetch(`${EXPLORER_API}/transactions/${hash}`, { signal: AbortSignal.timeout(15_000) }).then((r) => (r.ok ? r.json() : null))
   if (!tx?.block_number || !tx.status) return null
-  const { items } = await fetch(`${EXPLORER_API}/transactions/${hash}/logs`).then((r) => r.json())
+  const { items } = await fetch(`${EXPLORER_API}/transactions/${hash}/logs`, { signal: AbortSignal.timeout(15_000) }).then((r) => r.json())
   return {
     transactionHash: hash,
     blockNumber: BigInt(tx.block_number),
@@ -142,7 +142,7 @@ export async function explorerLogs(address, abi, eventName, fromBlock) {
   const topic0 = toEventSelector(getAbiItem({ abi, name: eventName }))
   let logs = []
   for (let to = 'latest'; ;) {
-    const { result, message } = await fetch(`${EXPLORER_API.replace('/v2', '')}?module=logs&action=getLogs&address=${address}&topic0=${topic0}&fromBlock=${fromBlock}&toBlock=${to}`).then((r) => r.json())
+    const { result, message } = await fetch(`${EXPLORER_API.replace('/v2', '')}?module=logs&action=getLogs&address=${address}&topic0=${topic0}&fromBlock=${fromBlock}&toBlock=${to}`, { signal: AbortSignal.timeout(30_000) }).then((r) => r.json())
     if (!Array.isArray(result)) throw new Error(`explorer getLogs: ${message}`) // "No logs found" still comes with []
     const oldest = logs[0]
     const page = result

@@ -66,7 +66,11 @@ async function watchRedemptions(holders) {
   }
 }
 
+const LOW_GAS = 10n ** 14n // BTC (18 decimals): ~600 transactions at Mezo testnet gas prices
+let lastGasWarn = 0
+
 async function tick() {
+  let failed = 0
   const [price, first, weeks] = await Promise.all([
     pub.readContract({ address: ADDR.priceFeed, abi: mezoAbi, functionName: 'fetchPrice' }),
     read('currentExpiry'),
@@ -78,19 +82,26 @@ async function tick() {
   const lists = await Promise.all(expiries.map((e) => read('strikeList', [e])))
   const touched = lists.flatMap((list, i) => list.filter((strike) => price <= strike).map((strike) => [expiries[i], strike]))
   const states = await Promise.all(touched.map((args) => read('strikes', args)))
-  for (const [i, [cover, triggered]] of states.entries()) if (!triggered && cover > 0n) await send('trigger', touched[i])
+  // One failed trigger (an app user got there first, an RPC hiccup) must not hold up the rest.
+  for (const [i, [cover, triggered]] of states.entries()) {
+    if (triggered || cover === 0n) continue
+    await send('trigger', touched[i]).catch((e) => { failed++; console.error(`trigger ${touched[i].join(' ')} failed: ${e.shortMessage ?? e.message}`) })
+  }
 
   const count = await read('policyCount')
   let allPaidBelow = scanFrom
   const ids = Array.from({ length: Number(count - scanFrom) }, (_, i) => scanFrom + BigInt(i))
   const policies = await Promise.all(ids.map((id) => read('policy', [id])))
+  const hit = await Promise.all(policies.map((p) => (p.claimed ? [0n, false] : read('strikes', [p.expiry, p.strike])))) // one multicall
+  const nowSec = BigInt(Math.floor(Date.now() / 1000))
   for (const [i, p] of policies.entries()) {
     const id = ids[i]
-    if (p.claimed) {
+    const triggered = hit[i][1]
+    // Done for good: paid, or expired untouched (a strike can't be triggered after expiry).
+    if (p.claimed || (!triggered && nowSec >= p.expiry)) {
       if (allPaidBelow === id) allPaidBelow = id + 1n
       continue
     }
-    const [, triggered] = await read('strikes', [p.expiry, p.strike])
     if (!triggered) {
       if (BigInt(Math.floor(Date.now() / 1000)) < p.expiry && price * 100n <= p.strike * ALERT_BAND) {
         await alert(p.holder, {
@@ -102,17 +113,33 @@ async function tick() {
       }
       continue
     }
-    const problem = await autoRepayProblem(pub, payung, p)
-    if (p.autoRepay && problem) console.log(`policy ${id}: repay would fail (${problem}), paying the wallet`)
-    const [upper, lower] = p.autoRepay && !problem ? await repayHints(pub, p.holder, p.cover) : [ZERO, ZERO]
-    const receipt = await send('claim', [id, upper, lower])
-    const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: receipt.logs })
-    if (paid) {
-      await alert(p.holder, {
-        tag: `paid-${payung.toLowerCase()}-${id}`,
-        title: `Payung paid your ${usd(p.strike)} cover`,
-        message: `BTC touched ${usd(p.strike)}. ${Number(formatUnits(p.cover, 18))} MUSD went ${paid.args.repaidTrove ? 'into your Mezo loan' : 'to your wallet'}.`,
-      })
+    // A slow repay dry-run or a race on one policy must not stall every other payout.
+    try {
+      const problem = await autoRepayProblem(pub, payung, p)
+      if (p.autoRepay && problem && nowSec <= p.sigDeadline) {
+        // The contract lets only the holder take a failed repay to the wallet before FALLBACK_DELAY
+        // (so nobody can starve a valid repay on purpose); the holder can still claim at once.
+        // A vault deployed before FALLBACK_DELAY has neither getter and pays the wallet at once.
+        const [at, delay] = await Promise.all([read('triggeredAt', [p.expiry, p.strike]), read('FALLBACK_DELAY')]).catch(() => [0n, 0n])
+        if (nowSec < at + delay) {
+          console.log(`policy ${id}: repay would fail (${problem}); the wallet payout opens to keepers at ${new Date(Number(at + delay) * 1000).toISOString()}`)
+          continue
+        }
+      }
+      if (p.autoRepay && problem) console.log(`policy ${id}: repay would fail (${problem}), paying the wallet`)
+      const [upper, lower] = p.autoRepay && !problem ? await repayHints(pub, p.holder, p.cover) : [ZERO, ZERO]
+      const receipt = await send('claim', [id, upper, lower])
+      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: receipt.logs })
+      if (paid) {
+        await alert(p.holder, {
+          tag: `paid-${payung.toLowerCase()}-${id}`,
+          title: `Payung paid your ${usd(p.strike)} cover`,
+          message: `BTC touched ${usd(p.strike)}. ${Number(formatUnits(p.cover, 18))} MUSD went ${paid.args.repaidTrove ? 'into your Mezo loan' : 'to your wallet'}.`,
+        })
+      }
+    } catch (e) {
+      failed++
+      console.error(`claim ${id} failed, retrying next tick: ${e.shortMessage ?? e.message}`)
     }
   }
   scanFrom = allPaidBelow
@@ -131,9 +158,15 @@ async function tick() {
 
   if (Date.now() - lastLog > 60_000) {
     lastLog = Date.now()
-    const vol = await read('volatility')
-    console.log(`[${new Date().toISOString()}] BTC $${Number(formatUnits(price, 18)).toFixed(0)} · vol ${Number(formatUnits(vol, 16)).toFixed(1)}% · policies ${count}`)
+    const [vol, gas] = await Promise.all([read('volatility'), pub.getBalance({ address: account.address })])
+    console.log(`[${new Date().toISOString()}] BTC $${Number(formatUnits(price, 18)).toFixed(0)} · vol ${Number(formatUnits(vol, 16)).toFixed(1)}% · policies ${count} · keeper gas ${formatUnits(gas, 18)} BTC`)
+    // An empty keeper fails every trigger quietly; GitHub Actions shows ::warning:: on the run page.
+    if (gas < LOW_GAS && Date.now() - lastGasWarn > 3_600_000) {
+      lastGasWarn = Date.now()
+      console.log(`::warning::Keeper ${account.address} has ${formatUnits(gas, 18)} BTC left for gas. Top it up from faucet.test.mezo.org.`)
+    }
   }
+  if (failed) throw new Error(`${failed} trigger/claim call(s) failed this tick; the rest went through`)
 }
 
 if (process.argv.includes('--once')) {

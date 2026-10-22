@@ -19,7 +19,7 @@ test.describe('without a wallet', () => {
     await expect(page.getByText(/volatility measured on-chain .*\d+% a year/)).toBeVisible()
 
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-    await expect(page.getByRole('status')).toHaveText(/No browser wallet found/)
+    await expect(page.getByRole('alert')).toHaveText(/No browser wallet found/)
 
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     await expect(page.locator('.facts div', { hasText: 'Vault value' })).toContainText('MUSD')
@@ -205,6 +205,42 @@ test.describe('without a wallet', () => {
     expect((await page.request.get(new URL(manifest.icons[0].src, page.url()).href)).ok()).toBe(true)
   })
 
+  test('My cover with real policies fits a phone screen', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 800 })
+    await page.goto('./?address=0xe42F6c4b72577CE2A64D583CF2f33a2D729c9C81') // the e2e wallet: real policies
+    await page.getByRole('button', { name: 'My cover' }).click()
+    await expect(page.locator('main.policies tbody tr').first()).toBeVisible()
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow, 'My cover overflows the phone width').toBeLessThanOrEqual(0)
+  })
+
+  test('browser alerts: a refusing Notification (Android) cannot take the page down, and old payouts are not news', async ({ page }) => {
+    const holder = '0xe42F6c4b72577CE2A64D583CF2f33a2D729c9C81'
+    const errors = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    // Android Chrome: permission granted, yet `new Notification` throws "Illegal constructor".
+    await page.addInitScript(() => {
+      window.__shown = []
+      window.Notification = class { constructor() { throw new TypeError('Illegal constructor') } static permission = 'granted'; static requestPermission = async () => 'granted' }
+      if (window.ServiceWorkerRegistration) ServiceWorkerRegistration.prototype.showNotification = async function (t, o) { window.__shown.push(o.body) }
+    })
+    await page.goto(`./?address=${holder}`)
+    await page.getByRole('button', { name: 'My cover' }).click()
+    await expect(page.locator('main.policies tbody tr').first()).toBeVisible()
+    await expect(page.getByText('Browser alerts are on')).toBeVisible()
+    const paid = await page.locator('main.policies tbody .pill', { hasText: 'Paid' }).count()
+    // Payouts that happened before this browser watched are remembered as seen, not announced.
+    await expect.poll(() => page.evaluate((k) => JSON.parse(localStorage.getItem(k) ?? 'null'), `payung.alerted.${holder.toLowerCase()}`)).not.toBeNull()
+    const seen = await page.evaluate((k) => JSON.parse(localStorage.getItem(k)), `payung.alerted.${holder.toLowerCase()}`)
+    expect(seen.filter((k) => k.startsWith('paid-'))).toHaveLength(paid)
+    expect((await page.evaluate(() => window.__shown)).filter((b) => b.includes('paid out'))).toEqual([])
+    await page.reload()
+    await page.getByRole('button', { name: 'My cover' }).click()
+    await expect(page.locator('main.policies tbody tr').first()).toBeVisible()
+    expect((await page.evaluate(() => window.__shown)).filter((b) => b.includes('paid out'))).toEqual([])
+    expect(errors).toEqual([])
+  })
+
   test('has no WCAG A/AA violations on any tab (axe-core)', async ({ page }) => {
     await page.goto('./')
     await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
@@ -239,6 +275,9 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     await expect.poll(() => w.state.requests).toContain('wallet_addEthereumChain')
     await expect.poll(() => w.state.chainId).toBe(31611)
     await expect(page.getByText('This wallet has no Mezo loan.')).toBeVisible()
+    // No loan, nothing to repay: no repay signature is asked for and the payout goes to the wallet.
+    await expect(page.getByLabel(/Repay my loan automatically/)).not.toBeChecked()
+    await expect(page.getByLabel(/Repay my loan automatically/)).toBeDisabled()
     await expect(page.getByRole('button', { name: /^Buy cover/ })).toBeDisabled() // no MUSD (or the vault is booked)
 
     // EIP-747: the wallet is asked to list both tokens with their real on-chain metadata.
@@ -293,11 +332,32 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     expect(errors).toEqual([])
   })
 
+  test('the wallet picker takes focus and closes with Escape', async ({ page }) => {
+    await installWallet(page, generatePrivateKey())
+    await page.addInitScript(() => { window.unisat = { requestAccounts: async () => [], getAccounts: async () => [] } })
+    await page.goto('./')
+    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    const picker = page.getByRole('dialog', { name: 'Choose a wallet' })
+    await expect(picker.getByRole('button', { name: 'E2E Wallet' })).toBeFocused()
+    await expect(picker.getByRole('button', { name: /Unisat via Mezo Passport/ })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(picker).toHaveCount(0)
+  })
+
+  test('declining the network switch says so and asks nothing more', async ({ page }) => {
+    const w = await installWallet(page, generatePrivateKey(), undefined, { rejectSwitch: true })
+    await page.goto('./')
+    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    await expect(page.getByRole('alert')).toHaveText('You cancelled the request in your wallet.')
+    await expect(page.getByText('Your wallet is on another network.')).toBeVisible()
+    expect(w.state.requests).not.toContain('wallet_addEthereumChain') // a "no" is not a missing network
+  })
+
   test('a connect request the user rejects says so and leaves the app usable', async ({ page }) => {
     await installWallet(page, generatePrivateKey(), undefined, { rejectConnect: true })
     await page.goto('./')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
-    await expect(page.getByRole('status')).toHaveText('You cancelled the request in your wallet.')
+    await expect(page.getByRole('alert')).toHaveText('You cancelled the request in your wallet.')
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
     await expect(page.locator('.facts div', { hasText: 'Vault value' })).toHaveCount(0) // still on Protect, nothing broken
     await expect(page.getByRole('slider')).toBeVisible()

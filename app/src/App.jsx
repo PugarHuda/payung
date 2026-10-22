@@ -13,6 +13,7 @@ const WALLET_KEY = 'payung.wallet' // the wallet last connected, to reconnect on
 const WAD = 10n ** 18n
 const STEP = 1000n * WAD
 const MIN_COVER = 10n * WAD
+const MIN_NEW_STRIKE_COVER = 100n * WAD // opening a strike nobody bought yet in that period, as in the contract
 const MCR = 110n // liquidation at 110% collateral ratio
 const CCR = 150n // in recovery mode (system ratio under 150%) loans under 150% can be liquidated
 const TARGET_CR = 150n // cover sized to lift the trove back to 150% at the strike
@@ -99,13 +100,39 @@ const REVERTS = {
   'Payung: not touched': 'BTC moved back above the strike before your trigger landed.',
   'Payung: already paid': 'This cover has already been paid out (the keeper got there first).',
   'PriceFeed: Oracle is stale.': 'The Mezo price feed is stale right now. Try again in a minute.',
+  'Payung: not holder': 'Only the wallet that bought this cover can change it. Switch back to that account.',
+  'Payung: more gas': 'The payout needs more gas. Try again.',
+  'Payung: repay failed': "Mezo didn't accept the repay into the loan. Only the cover's owner can take the payout to their wallet in the first 6 hours.",
+  'Payung: new strike needs 100 MUSD': 'Nobody has bought this strike yet in this period, and opening a new one takes at least 100 MUSD of cover.',
+}
+// OpenZeppelin custom errors carry no reason string, only a name.
+const CUSTOM = {
+  ERC4626ExceededMaxWithdraw: 'BTC moved and less is free to withdraw now. Lower the amount or press Max again.',
+  ERC4626ExceededMaxRedeem: 'BTC moved and less is free to withdraw now. Press Max again.',
+  EnforcedPause: 'The vault owner has paused new cover.',
+  ERC20InsufficientAllowance: 'The MUSD approval is too small. Try again to approve the new amount.',
+  ERC20InsufficientBalance: 'Your wallet holds too little MUSD for this.',
 }
 function explain(e) {
   if (e?.walk?.((x) => x.code === 4001) || /rejected|denied/i.test(e?.message ?? '')) return 'You cancelled the request in your wallet.'
   if (/Not enough native token balance/.test(e?.message ?? '')) return 'Your Mezo Passport account needs a little BTC on Mezo to pay the gas. Send some to it (faucet.test.mezo.org on testnet) and try again.'
   if (e?.walk?.((x) => x.name === 'InsufficientFundsError')) return 'Your wallet has too little BTC to pay the gas. Get testnet BTC from the Mezo faucet (faucet.test.mezo.org) and try again.'
   const reason = e?.walk?.((x) => x.reason)?.reason
+  const name = e?.walk?.((x) => x.data?.errorName)?.data?.errorName
+  if (CUSTOM[name]) return CUSTOM[name]
   return REVERTS[reason] ?? reason ?? e?.shortMessage ?? e?.message ?? String(e)
+}
+
+/** A browser alert, through the service worker when there is one (Android Chrome refuses
+ *  `new Notification`); an alert must never take the page down. */
+async function show(body) {
+  try {
+    const sw = await navigator.serviceWorker?.getRegistration()
+    if (sw) return await sw.showNotification('Payung', { body })
+    new Notification('Payung', { body })
+  } catch (e) {
+    console.warn('alert not shown', e)
+  }
 }
 
 /** EIP-6963: every injected wallet announces itself; fall back to window.ethereum. */
@@ -158,7 +185,11 @@ export default function App() {
     btcHistory().then(setBtc, () => setBtc(null))
   }, [])
   const [alerts, setAlerts] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted')
-  const alerted = useRef(new Set())
+  // Android shows page alerts only through a service worker (public/sw.js); only alert users get one.
+  useEffect(() => {
+    if (alerts) navigator.serviceWorker?.register('sw.js').catch((e) => console.warn('service worker', e))
+  }, [alerts])
+  const alerted = useRef() // alert keys already shown, per account, kept across reloads
 
   const wallet = useMemo(() => btcWallet?.client ?? (provider ? createWalletClient({ chain: mezoTestnet, transport: custom(provider) }) : null), [provider, btcWallet])
   const watching = !!account && !wallet
@@ -185,6 +216,10 @@ export default function App() {
   // A refresh asked for mid-flight (e.g. right after a transaction) runs once the current one ends.
   const inflight = useRef(null)
   const again = useRef(false)
+  // A load started for the previous account must not write its data under the new one.
+  const acct = useRef(account)
+  acct.current = account
+  const latest = useRef()
   const refresh = useCallback(() => {
     if (inflight.current) {
       again.current = true
@@ -194,12 +229,13 @@ export default function App() {
       inflight.current = null
       if (again.current) {
         again.current = false
-        refresh() // not returned: awaiting callers must not wait on an endless chain of refreshes
+        latest.current() // the newest refresh (the account may have changed); not returned: awaiting callers must not wait on an endless chain
       }
     })
     return inflight.current
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account])
+  latest.current = refresh
 
   const load = async () => {
     const [price, round] = await Promise.all([readM(ADDR.priceFeed, 'fetchPrice').catch(() => null), readM(ADDR.oracle, 'latestRoundData').catch(() => null)])
@@ -245,10 +281,12 @@ export default function App() {
         return { id, ...p, triggered, live, problem: live && p.autoRepay ? undefined : null } // undefined: still checking
       }),
     )
+    if (acct.current !== account) return
     setMe(mine)
     // The repay dry-run is the slow part; show the table first and fill it in.
     // An RPC failure leaves the row on "checking" (undefined) until the next refresh.
     const problems = await Promise.all(mine.policies.map((p) => (p.problem === undefined ? autoRepayProblem(pub, PAYUNG, p).catch(() => undefined) : null)))
+    if (acct.current !== account) return
     setMe((m) => (m.policies !== mine.policies ? m : { ...m, policies: mine.policies.map((p, i) => ({ ...p, problem: problems[i] })) }))
   }
 
@@ -264,25 +302,33 @@ export default function App() {
 
   // Browser alerts: BTC close to one of my strikes, or a payout landed.
   useEffect(() => {
-    if (!alerts || !chain.price || !me.policies) return
+    if (!alerts || !chain.price || !me.policies || !account) return
+    const key = `payung.alerted.${account.toLowerCase()}`
+    if (alerted.current?.account !== account) {
+      let seen = null
+      try { seen = JSON.parse(localStorage.getItem(key)) } catch {}
+      // First time on this account: payouts that already happened are history, not news.
+      alerted.current = { account, seen: new Set(seen ?? me.policies.filter((p) => p.claimed).map((p) => `paid-${p.id}`)) }
+    }
+    const { seen } = alerted.current
     for (const p of me.policies) {
       const near = p.live && !p.triggered && chain.price * 100n <= p.strike * ALERT_BAND
       for (const k of [near && `near-${p.id}`, p.claimed && `paid-${p.id}`].filter(Boolean)) {
-        if (alerted.current.has(k)) continue
-        alerted.current.add(k)
-        new Notification('Payung', {
-          body: k.startsWith('near')
-            ? `BTC is ${usd(chain.price)}, within 3% of your ${usd(p.strike)} umbrella.`
-            : `Your ${musd(p.cover, 0)} cover paid out ${p.autoRepay ? 'into your loan' : 'to your wallet'}.`,
-        })
+        if (seen.has(k)) continue
+        seen.add(k)
+        // The policy doesn't record where a payout went (the PolicyPaid event does), so don't guess.
+        show(k.startsWith('near') ? `BTC is ${usd(chain.price)}, within 3% of your ${usd(p.strike)} umbrella.` : `Your ${musd(p.cover, 0)} cover paid out. My cover shows where the MUSD went.`)
       }
     }
-  }, [alerts, chain.price, me.policies])
+    try { localStorage.setItem(key, JSON.stringify([...seen])) } catch {}
+  }, [alerts, chain.price, me.policies, account])
 
   async function switchChain(client = wallet) {
     try {
       await client.switchChain({ id: mezoTestnet.id })
-    } catch {
+    } catch (e) {
+      // Only a wallet that doesn't know Mezo (4902) gets an "add network" prompt; a "no" stays a no.
+      if (!e?.walk?.((x) => x.code === 4902) && !/unrecognized|not been added|unknown chain/i.test(e?.message ?? '')) throw e
       await client.addChain({ chain: mezoTestnet })
     }
     setChainId(await client.getChainId())
@@ -424,15 +470,15 @@ export default function App() {
       </header>
 
       {picking && (
-        <div className="banner picker" role="dialog" aria-label="Choose a wallet">
+        <div className="banner picker" role="dialog" aria-label="Choose a wallet" onKeyDown={(e) => e.key === 'Escape' && setPicking(false)}>
           <span>Choose a wallet:</span>
           {wallets.map((w) => (
-            <button key={w.info.uuid} onClick={() => connectWith(w)}>
+            <button key={w.info.uuid} autoFocus={w === wallets[0]} onClick={() => connectWith(w)}>
               {w.info.icon && <img src={w.info.icon} alt="" width="18" height="18" />} {w.info.name}
             </button>
           ))}
-          {btcWallets().map((w) => (
-            <button key={w.id} onClick={() => connectBitcoin(w.id)}>{w.name} <small>via Mezo Passport</small></button>
+          {btcWallets().map((w, i) => (
+            <button key={w.id} autoFocus={!wallets.length && i === 0} onClick={() => connectBitcoin(w.id)}>{w.name} <small>via Mezo Passport</small></button>
           ))}
           <button className="tab" onClick={() => setPicking(false)}>Cancel</button>
         </div>
@@ -448,7 +494,7 @@ export default function App() {
       {chain.price === null && <p className="banner error">The Mezo price feed is not answering right now, so new cover and deposits are on hold. Withdrawals, triggers and payouts still work.</p>}
       {chain.paused && <p className="banner error">The vault owner has paused new cover. Existing cover, triggers, payouts, deposits and withdrawals keep working.</p>}
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
-      {notice && <p className={`banner ${notice.kind}`} role="status">{notice.text} {notice.hash && txLink(notice.hash)}</p>}
+      {notice && <p className={`banner ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text} {notice.hash && txLink(notice.hash)}</p>}
 
       {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
@@ -506,7 +552,8 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
     } else setCover((c) => c || String(capacity >= 100n * WAD || capacity < MIN_COVER ? 100n : capacity / MIN_COVER * 10n)) // no loan: a sample amount the vault can back
   }, [price, liq, me, account, strike, minStrike, maxStrike, capacity, prefill, chain.expiry])
 
-  const autoRepay = wantRepay && !me.smartAccount // smart accounts can't sign Mezo's ECDSA repay
+  // Smart accounts can't sign Mezo's ECDSA repay, and with no loan there is nothing to repay.
+  const autoRepay = wantRepay && !me.smartAccount && me.hasTrove !== false
   const coverWei = parseAmount(cover)
   const coverError = coverWei === null ? 'Enter a number, like 500.' : coverWei > 0n && coverWei < MIN_COVER ? 'The smallest cover is 10 MUSD.' : null
 
@@ -527,7 +574,10 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   const sold = chain.strikes?.find((s) => s.expiry === expiry && s.strike === strike)
   const touched = !!sold?.triggered
   const noRoom = !sold && !!chain.full?.has(expiry)
+  const newStrikeTooSmall = !sold && !!coverWei && coverWei >= MIN_COVER && coverWei < MIN_NEW_STRIKE_COVER
   const cantPay = !!quote && me.bal != null && me.bal < quote.premium
+  // BTC moved since the strike was picked: the contract would refuse it, so don't ask for signatures.
+  const outOfBand = !!strike && !!minStrike && (strike < minStrike || strike > maxStrike)
   const leavesTooLittle = me.hasTrove && autoRepay && !!coverWei && me.debt - coverWei < 2000n * WAD
   // Mezo only accepts a repay that leaves the loan at or above 110% at that price; below it the
   // payout falls back to the wallet (and the loan may already be liquidated).
@@ -613,6 +663,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <strong className="big">{usd(strike)}{quote && <small> · {(Number(quote.distance) / 100).toFixed(1)}% below now</small>}</strong>
           {moved && <em className="hint">Your previous strike, {usd(moved)}, is outside today's range of 5–30% below BTC, so the nearest one is picked.</em>}
           {touched && <em className="warn">BTC already touched {usd(strike)} in this cover period, so it no longer sells. Pick another strike or period.</em>}
+          {outOfBand && <em className="warn">BTC moved to {usd(price)}, so {usd(strike)} is no longer 5–30% below it. <button className="small" onClick={() => setStrike(strike < minStrike ? minStrike : maxStrike)}>Use {usd(strike < minStrike ? minStrike : maxStrike)}</button></em>}
           {noRoom && <em className="warn">This cover period already sells its maximum of 32 strikes. Pick one of them or another period.</em>}
         </label>
 
@@ -632,6 +683,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
           <span>Cover amount (MUSD)</span>
           <input inputMode="decimal" value={cover} aria-invalid={!!coverError || tooBig} onChange={(e) => setCover(e.target.value.replace(/[^0-9.]/g, ''))} />
           {coverError && <em className="warn">{coverError}</em>}
+          {newStrikeTooSmall && <em className="warn">Nobody has bought {usd(strike)} for this period yet. Opening a new strike takes at least 100 MUSD of cover; under that, pick a strike someone already bought.</em>}
           {tooBig && (capacity < MIN_COVER
             ? <em className="warn">The vault's cover is fully booked. Capacity grows when underwriters deposit or when cover expires: {musd(expiring, 0)} of it on {date(chain.expiry)}.</em>
             : <em className="warn">The vault can back {musd(capacity, 0)} more right now. Lower the cover.</em>)}
@@ -644,7 +696,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         )}
 
         <label className="check">
-          <input type="checkbox" checked={autoRepay} disabled={!!me.smartAccount} onChange={(e) => setAutoRepay(e.target.checked)} />
+          <input type="checkbox" checked={autoRepay} disabled={!!me.smartAccount || me.hasTrove === false} onChange={(e) => setAutoRepay(e.target.checked)} />
           <span>Repay my loan automatically when it pays out (you sign Mezo's repay message once)</span>
         </label>
         {me.smartAccount && <em className="warn">This is a smart-contract account. Mezo only accepts repay signatures from regular wallets, so the payout goes to your wallet.</em>}
@@ -670,7 +722,7 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
         {account && !watching ? (
-          <button className="primary wide" disabled={!canWrite || !quote || tooBig || touched || noRoom || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
+          <button className="primary wide" disabled={!canWrite || !quote || tooBig || touched || noRoom || outOfBand || newStrikeTooSmall || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
             {busy === 'buy' ? 'Opening umbrella…' : `Buy cover for ${quote ? musd(quote.premium) : '…'}`}
           </button>
         ) : (
@@ -686,7 +738,7 @@ const ONE_SHARE = 10n ** 24n // 1 pyMUSD: 18 decimals plus the vault's 6-decimal
 // Volatility samples (every 15 min) are left out: they'd bury everything else. The newest shows as "Last price sample".
 const VAULT_EVENTS = ['PolicyBought', 'StrikeTriggered', 'PolicyPaid', 'Deposit', 'Withdraw', 'AutoRepayUpdated', 'MaxUtilizationUpdated', 'PremiumTableUpdated', 'Paused', 'Unpaused']
 
-function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, connect, addToken, canWrite }) {
+function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, readP, connect, addToken, canWrite }) {
   const [amount, setAmount] = useState('')
   const [activity, setActivity] = useState()
   const [shown, setShown] = useState(12)
@@ -788,7 +840,10 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
               return { hash, text: `Deposited ${musd(wei)}.` }
             })}>{busy === 'deposit' ? 'Depositing…' : 'Deposit'}</button>
             <button disabled={!canWrite || !wei || wei > (me.maxWithdraw ?? 0n) || !!busy} onClick={() => run('withdraw', async () => {
-              const hash = await write(PAYUNG, payungAbi, 'withdraw', [wei, account, account])
+              // Max redeems every share it can: an exact asset amount goes stale as NAV moves with BTC.
+              const hash = wei === me.maxWithdraw
+                ? await write(PAYUNG, payungAbi, 'redeem', [await readP('maxRedeem', [account]), account, account])
+                : await write(PAYUNG, payungAbi, 'withdraw', [wei, account, account])
               return { hash, text: `Withdrew ${musd(wei)}.` }
             })}>{busy === 'withdraw' ? 'Withdrawing…' : 'Withdraw'}</button>
             {me.maxWithdraw > 0n && <button className="tab" onClick={() => setAmount(formatUnits(me.maxWithdraw, 18))}>Max</button>}
@@ -904,7 +959,10 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
       const [upper, lower] = tryLoan ? await repayHints(pub, p.holder, p.cover) : [ZERO, ZERO]
       const hash = await write(PAYUNG, payungAbi, 'claim', [p.id, upper, lower])
       // Report where the MUSD actually went (the contract falls back to the wallet if Mezo refuses the repay).
-      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: (await waitForReceipt(pub, hash)).logs })
+      // write() already saw it succeed, so a failed re-read must not turn a payout into an error.
+      const receipt = await waitForReceipt(pub, hash).catch(() => null)
+      if (!receipt) return { hash, text: `Paid ${musd(p.cover, 0)}. The transaction shows whether it went into your loan or your wallet.` }
+      const [paid] = parseEventLogs({ abi: payungAbi, eventName: 'PolicyPaid', logs: receipt.logs })
       return { hash, text: `Paid ${musd(p.cover, 0)} ${paid?.args.repaidTrove ? 'into your loan' : 'to your wallet (Mezo did not accept the repay signature)'}.` }
     })
 

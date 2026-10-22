@@ -5,7 +5,7 @@ import { createPublicClient, createWalletClient, http, numberToHex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet } from '../shared/mezo.js'
 
-export async function installWallet(page, key, rpc, { rejectConnect = false } = {}) {
+export async function installWallet(page, key, rpc, { rejectConnect = false, rejectSwitch = false } = {}) {
   const account = privateKeyToAccount(key)
   const pub = createPublicClient({ chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
   const wallet = createWalletClient({ account, chain: mezoTestnet, transport: http(rpc, { timeout: 60_000 }) })
@@ -30,6 +30,7 @@ export async function installWallet(page, key, rpc, { rejectConnect = false } = 
         return null
       case 'wallet_switchEthereumChain': {
         const id = Number(params[0].chainId)
+        if (rejectSwitch) throw { code: 4001, message: 'User rejected the request.' }
         if (id === mezoTestnet.id && !state.mezoAdded) throw { code: 4902, message: 'Unrecognized chain ID' }
         state.chainId = id
         return null

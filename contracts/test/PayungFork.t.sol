@@ -117,6 +117,36 @@ contract PayungForkTest is Test {
         assertEq(vault.totalOwed(), 0);
     }
 
+    /// Griefing check: a caller picks the gas and the hints. No gas limit that lets claim succeed
+    /// may divert a valid auto-repay to the wallet; too little gas has to revert the whole claim.
+    function test_fork_claimGasCannotDivertRepayToWallet() public {
+        _openTrove(lp, 20_000e18);
+        vm.startPrank(lp);
+        IERC20(MUSD).approve(address(vault), type(uint256).max);
+        vault.deposit(15_000e18, lp);
+        vm.stopPrank();
+        _openTrove(borrower, 5_000e18);
+        uint256 strike = (IPriceFeed(PRICE_FEED).fetchPrice() * 90 / 100) / 1000e18 * 1000e18;
+        uint256 deadline = vault.currentExpiry() + 1 days;
+        bytes memory sig = _signRepay(1_000e18, deadline);
+        vm.startPrank(borrower);
+        IERC20(MUSD).approve(address(vault), type(uint256).max);
+        uint256 id = vault.buy(vault.currentExpiry(), strike, 1_000e18, type(uint256).max, true, deadline, sig);
+        vm.stopPrank();
+        _setPrice(strike);
+        vault.trigger(vault.currentExpiry(), strike);
+
+        address griefer = makeAddr("griefer");
+        for (uint256 gas = 820_000; gas <= 3_000_000; gas += 20_000) {
+            uint256 snap = vm.snapshotState();
+            uint256 walletBefore = IERC20(MUSD).balanceOf(borrower);
+            vm.prank(griefer);
+            (bool ok,) = address(vault).call{gas: gas}(abi.encodeCall(Payung.claim, (id, address(0), address(0))));
+            if (ok && IERC20(MUSD).balanceOf(borrower) != walletBefore) revert(string.concat("wallet payout at gas ", vm.toString(gas)));
+            vm.revertToState(snap);
+        }
+    }
+
     /// A signature made with a nonce Mezo no longer accepts is replaced by the holder before the touch.
     function test_fork_rearmedSignatureRepaysRealTrove() public {
         _openTrove(lp, 20_000e18);

@@ -51,7 +51,9 @@ contract Handler is Test {
         uint256 expiry = vault.currentExpiry() + bound(weeksOut, 0, vault.MAX_WEEKS() - 1) * 1 weeks;
         uint256 price = feed.price();
         uint256 strike = (price * (100 - bound(distancePct, 6, 29)) / 100) / 1000e18 * 1000e18;
-        cover = bound(cover, 10e18, 50_000e18);
+        // Small cover only on a strike someone already opened (a new one needs MIN_NEW_STRIKE_COVER).
+        (uint256 sold,) = vault.strikes(expiry, strike);
+        cover = bound(cover, sold > 0 ? 10e18 : vault.MIN_NEW_STRIKE_COVER(), 50_000e18);
         if (cover > vault.coverCapacity() || block.timestamp + 1 hours >= expiry) return;
         (, uint256 distance) = vault.quote(expiry, strike, cover);
         if (distance < 500 || distance > 3000) return;
@@ -62,9 +64,14 @@ contract Handler is Test {
         if (ok) {
             ids.push(vault.policyCount() - 1);
         } else {
-            // Only a strike already touched this epoch, or a full strike list, may refuse a valid buy.
-            (, bool triggered) = vault.strikes(expiry, strike);
-            assertTrue(triggered || vault.strikeList(expiry).length >= vault.MAX_STRIKES(), "valid buy reverted");
+            // Only a strike already touched this epoch, a full strike list, or a new strike under
+            // the new-strike minimum may refuse a valid buy.
+            (uint256 sold, bool triggered) = vault.strikes(expiry, strike);
+            assertTrue(
+                triggered || vault.strikeList(expiry).length >= vault.MAX_STRIKES()
+                    || (sold == 0 && cover < vault.MIN_NEW_STRIKE_COVER()),
+                "valid buy reverted"
+            );
         }
     }
 
@@ -92,6 +99,7 @@ contract Handler is Test {
         (, bool triggered) = vault.strikes(p.expiry, p.strike);
         if (p.claimed || !triggered) return;
         sigs.setFail(failRepay);
+        if (failRepay) vm.prank(p.holder); // only the holder takes a failed repay to the wallet at once
         vault.claim(id, address(0), address(0));
         paidOut += p.cover;
     }
