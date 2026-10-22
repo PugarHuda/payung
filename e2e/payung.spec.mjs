@@ -271,6 +271,28 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     expect(errors).toEqual([])
   })
 
+  test('a Bitcoin wallet connects through Mezo Passport as its smart account, paying out to the wallet', async ({ page }) => {
+    const errors = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    // A stand-in Unisat holding the BIP-173 test key (the secp256k1 generator) on Bitcoin testnet.
+    await page.addInitScript(() => {
+      const accounts = ['tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx']
+      window.unisat = { requestAccounts: async () => accounts, getAccounts: async () => accounts, getPublicKey: async () => '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' }
+    })
+    await page.goto('./')
+    await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
+    await page.getByRole('button', { name: /Unisat via Mezo Passport/ }).click()
+    // The account is the smart account OrangeKit predicts on Mezo testnet, not the Bitcoin address.
+    await expect(page.locator('.acct')).toHaveAttribute('title', /^0x[0-9a-fA-F]{40}$/, { timeout: 30_000 })
+    await expect(page.getByText(/This is a smart-contract account/)).toBeVisible()
+    await expect(page.getByLabel(/Repay my loan automatically/)).toBeDisabled()
+    await page.getByRole('button', { name: 'My cover' }).click()
+    await expect(page.getByRole('button', { name: 'Send a test alert' })).toBeDisabled() // BTC signatures aren't EIP-191
+    await page.getByRole('button', { name: 'Disconnect' }).click()
+    await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
+    expect(errors).toEqual([])
+  })
+
   test('a connect request the user rejects says so and leaves the app usable', async ({ page }) => {
     await installWallet(page, generatePrivateKey(), undefined, { rejectConnect: true })
     await page.goto('./')

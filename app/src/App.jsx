@@ -29,13 +29,18 @@ const pub = createPublicClient({ chain: mezoTestnet, batch: { multicall: true },
 // Archive reads of Mezo's BTC oracle, JSON-RPC batched (Mezo's RPC takes 100 calls per request).
 const archive = createPublicClient({ chain: mezoTestnet, transport: http(import.meta.env.VITE_MEZO_RPC, { batch: { batchSize: 100 }, timeout: 30_000 }) })
 const HISTORY_DAYS = 30
-const HISTORY_STEP = 1500n // blocks: ~2 hours at Mezo's ~4.8 s blocks
+const BTC_POINTS = 360 // one every 2 hours
 /** BTC on Mezo's oracle every ~2 hours for 30 days, oldest first: [{ t, p }]. */
 async function btcHistory() {
-  const head = await archive.getBlockNumber()
-  const n = Math.round((HISTORY_DAYS * 86400) / 4.8 / Number(HISTORY_STEP))
-  const rounds = await Promise.all(Array.from({ length: n }, (_, i) =>
-    archive.readContract({ address: ADDR.oracle, abi: mezoAbi, functionName: 'latestRoundData', blockNumber: head - BigInt(n - 1 - i) * HISTORY_STEP })))
+  // Block time varies (4.35-4.9 s), so find the block 30 days back: guess, then correct once.
+  const span = HISTORY_DAYS * 86400
+  const head = await archive.getBlock()
+  let from = head.number - BigInt(Math.round(span / 4.5))
+  const guess = await archive.getBlock({ blockNumber: from })
+  from = head.number - BigInt(Math.round((span * Number(head.number - from)) / Number(head.timestamp - guess.timestamp)))
+  const step = (head.number - from) / BigInt(BTC_POINTS)
+  const rounds = await Promise.all(Array.from({ length: BTC_POINTS + 1 }, (_, i) =>
+    archive.readContract({ address: ADDR.oracle, abi: mezoAbi, functionName: 'latestRoundData', blockNumber: head.number - BigInt(BTC_POINTS - i) * step })))
   return rounds.map((r) => ({ t: Number(r[3]), p: Number(formatUnits(r[1], 18)) }))
 }
 
@@ -97,6 +102,7 @@ const REVERTS = {
 }
 function explain(e) {
   if (e?.walk?.((x) => x.code === 4001) || /rejected|denied/i.test(e?.message ?? '')) return 'You cancelled the request in your wallet.'
+  if (/Not enough native token balance/.test(e?.message ?? '')) return 'Your Mezo Passport account needs a little BTC on Mezo to pay the gas. Send some to it (faucet.test.mezo.org on testnet) and try again.'
   if (e?.walk?.((x) => x.name === 'InsufficientFundsError')) return 'Your wallet has too little BTC to pay the gas. Get testnet BTC from the Mezo faucet (faucet.test.mezo.org) and try again.'
   const reason = e?.walk?.((x) => x.reason)?.reason
   return REVERTS[reason] ?? reason ?? e?.shortMessage ?? e?.message ?? String(e)
@@ -115,6 +121,13 @@ function useWallets() {
   return window.ethereum ? [{ info: { uuid: 'injected', name: 'Browser wallet' }, provider: window.ethereum }] : []
 }
 
+/** Bitcoin wallets Mezo Passport supports, if their extension is installed. */
+const btcWallets = () => [
+  window.unisat && { id: 'unisat', name: 'Unisat' },
+  window.okxwallet?.bitcoin && { id: 'okx', name: 'OKX (Bitcoin)' },
+  window.XverseProviders?.BitcoinProvider && { id: 'xverse', name: 'Xverse' },
+].filter(Boolean)
+
 /** Price at which the trove can be liquidated: 110%, or 150% once the whole system falls into
  *  recovery mode (its ratio scales with price, so recovery starts at price × 150% / TCR). */
 function liquidationPrice({ coll, debt }, price, tcr) {
@@ -129,6 +142,7 @@ function liquidationPrice({ coll, debt }, price, tcr) {
 export default function App() {
   const wallets = useWallets()
   const [provider, setProvider] = useState()
+  const [btcWallet, setBtcWallet] = useState() // a Mezo Passport connection: { client, disconnect }
   const [picking, setPicking] = useState(false)
   const [account, setAccount] = useState(WATCH)
   const [chainId, setChainId] = useState()
@@ -146,8 +160,8 @@ export default function App() {
   const [alerts, setAlerts] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted')
   const alerted = useRef(new Set())
 
-  const wallet = useMemo(() => (provider ? createWalletClient({ chain: mezoTestnet, transport: custom(provider) }) : null), [provider])
-  const watching = !!account && !provider
+  const wallet = useMemo(() => btcWallet?.client ?? (provider ? createWalletClient({ chain: mezoTestnet, transport: custom(provider) }) : null), [provider, btcWallet])
+  const watching = !!account && !wallet
   const wrongChain = !!provider && !!account && chainId !== mezoTestnet.id
   const readP = useCallback((functionName, args = []) => pub.readContract({ address: PAYUNG, abi: payungAbi, functionName, args }), [])
   const readM = useCallback((address, functionName, args = []) => pub.readContract({ address, abi: mezoAbi, functionName, args }), [])
@@ -291,6 +305,8 @@ export default function App() {
 
   function disconnect() {
     try { localStorage.removeItem(WALLET_KEY) } catch {}
+    btcWallet?.disconnect().catch(() => {})
+    setBtcWallet(undefined)
     setProvider(undefined)
     setAccount(undefined)
     setMe({})
@@ -311,6 +327,20 @@ export default function App() {
     }
   }
 
+  async function connectBitcoin(id) {
+    setPicking(false)
+    try {
+      const { connectBitcoin } = await import('./passport.js')
+      const { address, client, disconnect } = await connectBitcoin(id)
+      setProvider(undefined)
+      setBtcWallet({ client, disconnect })
+      setAccount(address)
+      setMe({})
+    } catch (e) {
+      setNotice({ kind: 'error', text: explain(e) })
+    }
+  }
+
   // EIP-747: ask the wallet to list a token, so pyMUSD and MUSD show up next to the user's BTC.
   async function addToken(address, symbol, decimals) {
     try {
@@ -322,8 +352,9 @@ export default function App() {
   }
 
   function connect() {
-    if (!wallets.length) return setNotice({ kind: 'error', text: 'No browser wallet found. Install MetaMask or another EVM wallet, then reload.' })
-    if (wallets.length === 1) return connectWith(wallets[0])
+    const btc = btcWallets().length
+    if (!wallets.length && !btc) return setNotice({ kind: 'error', text: 'No browser wallet found. Install MetaMask or another EVM wallet, or a Bitcoin wallet (Unisat, OKX, Xverse), then reload.' })
+    if (wallets.length === 1 && !btc) return connectWith(wallets[0])
     setPicking(true)
   }
 
@@ -351,6 +382,7 @@ export default function App() {
     const req = { account, address, abi, functionName, args }
     await pub.simulateContract(req) // a revert reason now beats a failed transaction later
     const hash = await wallet.writeContract({ ...req, gas: GAS })
+    if (hash === '0x') throw new Error("Mezo Passport's relay did not accept the transaction. Try again.") // relay answered without a hash
     setNotice({ kind: 'info', text: 'Sent. Waiting for Mezo to confirm…', hash })
     const r = await waitForReceipt(pub, hash).catch(() => {
       throw new Error(`Sent, but Mezo has not confirmed it after 3 minutes. Check ${EXPLORER}/tx/${hash}`)
@@ -369,7 +401,9 @@ export default function App() {
     return wallet.signTypedData({ account, ...repayTypedData({ amount, borrower: account, nonce, deadline }) })
   }
 
-  const ctx = { chain, me, account, busy, run, write, ensureAllowance, signRepay, readP, connect, addToken, canWrite: !!provider && !!account && !wrongChain, watching }
+  // A Passport account is a smart account even before its first transaction deploys it.
+  const meSeen = useMemo(() => (btcWallet ? { ...me, smartAccount: true } : me), [me, btcWallet])
+  const ctx = { chain, me: meSeen, account, busy, run, write, ensureAllowance, signRepay, readP, connect, addToken: btcWallet ? undefined : addToken, canWrite: !!wallet && !!account && !wrongChain, watching }
 
   return (
     <div className="shell">
@@ -397,6 +431,9 @@ export default function App() {
               {w.info.icon && <img src={w.info.icon} alt="" width="18" height="18" />} {w.info.name}
             </button>
           ))}
+          {btcWallets().map((w) => (
+            <button key={w.id} onClick={() => connectBitcoin(w.id)}>{w.name} <small>via Mezo Passport</small></button>
+          ))}
           <button className="tab" onClick={() => setPicking(false)}>Cancel</button>
         </div>
       )}
@@ -415,7 +452,7 @@ export default function App() {
 
       {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
-      {tab === 'policies' && <Policies {...ctx} signer={{ signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
+      {tab === 'policies' && <Policies {...ctx} signer={btcWallet ? undefined : { signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
         setPrefill({ strike: p.strike, cover: formatUnits(p.cover, 18), expiry: p.expiry + WEEK })
         setTab('protect')
       }} />}
@@ -732,7 +769,7 @@ function Underwrite({ chain, me, account, busy, run, write, ensureAllowance, con
             Your position: <strong>{musd(me.assets)}</strong>. Wallet: {musd(me.bal)}.
             {earned != null && <> Earned so far: <strong className="earned">{earned >= 0n ? '+' : '−'}{musd(earned >= 0n ? earned : -earned, 4)}</strong> on {musd(deposited, 0)} deposited.</>}
           </p>
-          {canWrite && (
+          {canWrite && addToken && (
             <p className="tokens">
               <button className="tab" onClick={() => addToken(PAYUNG, 'pyMUSD', 24)}>Add pyMUSD to my wallet</button>
               <button className="tab" onClick={() => addToken(ADDR.musd, 'MUSD', 18)}>Add MUSD to my wallet</button>
@@ -888,7 +925,7 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
         </p>
         <p>
           <a href={`${NTFY}/${topicFor(account)}`} target="_blank" rel="noreferrer">Open my alerts in ntfy</a>{' '}
-          <button className="small" disabled={!canWrite || !!busy} onClick={() => run('ntfy', async () => {
+          <button className="small" disabled={!canWrite || !signer || !!busy} title={signer ? undefined : 'Bitcoin wallets sign in a format the alert check cannot read yet'} onClick={() => run('ntfy', async () => {
             await notify(account, { title: 'Payung test alert', message: 'Alerts about your cover will arrive here.', tag: 'test' }, signer)
             setTimeout(loadPhone, 2000) // ntfy.sh shows a new message within a second or two
             return { text: `Test alert sent to ${topicFor(account)}, signed by your wallet. If ntfy is subscribed, it is on your phone now.` }
