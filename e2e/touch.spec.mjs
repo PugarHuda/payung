@@ -48,7 +48,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
       const busy = await fetch(url).then(() => true, () => false)
       if (busy) throw new Error(`${url} is already in use; stop that process first`)
     }
-    start(`anvil --fork-url https://rpc.test.mezo.org --port 8786 --chain-id 31611 --silent`)
+    start(`anvil --fork-url https://rpc.test.mezo.org --port 8786 --chain-id 31611 --no-rate-limit --silent`)
     await until(() => fork.getBlockNumber())
     await fork.request({ method: 'anvil_mine', params: ['0x1'] }) // Mezo headers lack blob-gas fields; a local block has them
     await fork.request({ method: 'anvil_setCode', params: [ADDR.priceFeed, RETURN_SLOT0] })

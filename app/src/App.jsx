@@ -228,7 +228,9 @@ export default function App() {
       inflight.current = null
       if (again.current) {
         again.current = false
-        latest.current() // the newest refresh (the account may have changed); not returned: awaiting callers must not wait on an endless chain
+        // The newest refresh (the account may have changed). Not returned: awaiting callers must not
+        // wait on an endless chain; caught, or a fetch cut off by a reload is an unhandled rejection.
+        latest.current().catch((e) => console.warn('refresh failed', e))
       }
     })
     return inflight.current
