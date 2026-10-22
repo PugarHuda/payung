@@ -2,18 +2,31 @@
 // drives a Mezo smart account: transactions go through it, signed by the Bitcoin wallet.
 // Loaded on demand (it is large), and used without RainbowKit or a wagmi provider tree:
 // a wagmi connector is only a factory taking { chains, emitter }.
-// ponytail: no reconnect on reload for BTC wallets; add with connector.isAuthorized() if asked for.
 import './node-shim.js'
 import { getOrangeKitUnisatConnector, getOrangeKitOKXConnector, getOrangeKitXverseConnector } from '@mezo-org/orangekit'
 import { mezoTestnet } from '../../shared/mezo.js'
 
 const FACTORIES = { unisat: getOrangeKitUnisatConnector, okx: getOrangeKitOKXConnector, xverse: getOrangeKitXverseConnector }
 
+async function connector(id) {
+  const c = FACTORIES[id]({ rpcUrl: mezoTestnet.rpcUrls.default.http[0], chainId: mezoTestnet.id })()({ chains: [mezoTestnet], emitter: { emit() {} } })
+  await c.setup()
+  return c
+}
+
+const session = async (c, address) => ({ address, client: await c.getClient({ chainId: mezoTestnet.id }), disconnect: () => c.disconnect() })
+
 /** Connect a Bitcoin wallet; resolves to the Mezo smart-account address and a viem wallet client. */
 export async function connectBitcoin(id) {
-  const rpcUrl = mezoTestnet.rpcUrls.default.http[0]
-  const connector = FACTORIES[id]({ rpcUrl, chainId: mezoTestnet.id })()({ chains: [mezoTestnet], emitter: { emit() {} } })
-  await connector.setup()
-  const { accounts } = await connector.connect({ chainId: mezoTestnet.id })
-  return { address: accounts[0], client: await connector.getClient({ chainId: mezoTestnet.id }), disconnect: () => connector.disconnect() }
+  const c = await connector(id)
+  const { accounts } = await c.connect({ chainId: mezoTestnet.id })
+  return session(c, accounts[0])
+}
+
+/** The same, without a prompt, if the wallet still lets this site read its account; else null. */
+export async function reconnectBitcoin(id) {
+  const c = await connector(id)
+  if (!(await c.isAuthorized())) return null
+  const [address] = await c.getAccounts()
+  return session(c, address)
 }

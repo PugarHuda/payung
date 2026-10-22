@@ -8,7 +8,10 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { mezoTestnet, ADDR, payungAbi, mezoAbi, repayHints, autoRepayProblem, redemptionQueue, redemptionHistory, waitForReceipt, GAS } from '../shared/mezo.js'
 import { notify, readAlerts } from '../shared/notify.js'
 
-const payung = process.env.PAYUNG ?? ADDR.payung
+// Every vault with live cover: the current one, and v1 until its last cover ends (one key, one
+// loop, so the two never race for a nonce). PAYUNG=0x... watches just that one.
+const vaults = process.env.PAYUNG ? [process.env.PAYUNG] : [ADDR.payung, ADDR.payungV1]
+let payung = vaults[0] // the vault this tick works on; read() and send() use it
 const account = privateKeyToAccount(process.env.KEEPER_KEY)
 const rpc = http(process.env.MEZO_RPC, { timeout: 60_000 }) // unset: Mezo testnet's public RPC; a repay dry-run can take a while
 const pub = createPublicClient({ chain: mezoTestnet, batch: { multicall: true }, transport: rpc }) // parallel reads -> one Multicall3 eth_call
@@ -44,9 +47,10 @@ async function send(functionName, args) {
   return receipt
 }
 
-let scanFrom = 0n // policies below this index are already paid
+const scanFrom = new Map() // vault => policies below this index are done
 let lastLog = 0
-let lastQueueCheck = 0
+const lastQueueCheck = new Map()
+const queueWatch = new Map() // vault => redemption-queue check in flight
 const QUEUE_CHECK_MS = 10 * 60_000 // the queue moves with loans, not with every price tick
 
 // Payung covers liquidation, not redemption, so tell a covered borrower when one redemption the
@@ -66,7 +70,6 @@ async function watchRedemptions(holders) {
   }
 }
 
-const LOW_GAS = 10n ** 14n // BTC (18 decimals): ~600 transactions at Mezo testnet gas prices
 let lastGasWarn = 0
 
 async function tick() {
@@ -89,8 +92,9 @@ async function tick() {
   }
 
   const count = await read('policyCount')
-  let allPaidBelow = scanFrom
-  const ids = Array.from({ length: Number(count - scanFrom) }, (_, i) => scanFrom + BigInt(i))
+  const from = scanFrom.get(payung) ?? 0n
+  let allPaidBelow = from
+  const ids = Array.from({ length: Number(count - from) }, (_, i) => from + BigInt(i))
   const policies = await Promise.all(ids.map((id) => read('policy', [id])))
   const hit = await Promise.all(policies.map((p) => (p.claimed ? [0n, false] : read('strikes', [p.expiry, p.strike])))) // one multicall
   const nowSec = BigInt(Math.floor(Date.now() / 1000))
@@ -142,26 +146,31 @@ async function tick() {
       console.error(`claim ${id} failed, retrying next tick: ${e.shortMessage ?? e.message}`)
     }
   }
-  scanFrom = allPaidBelow
+  scanFrom.set(payung, allPaidBelow)
 
-  if (Date.now() - lastQueueCheck > QUEUE_CHECK_MS) {
-    lastQueueCheck = Date.now()
+  // The queue walk reads every sorted trove: slow on a slow RPC. It runs beside the loop so it never
+  // holds up a trigger, a payout or a volatility sample; at most one per vault at a time.
+  if (!queueWatch.has(payung) && Date.now() - (lastQueueCheck.get(payung) ?? 0) > QUEUE_CHECK_MS) {
+    lastQueueCheck.set(payung, Date.now())
     const now = BigInt(Math.floor(Date.now() / 1000))
     const covered = new Set(policies.filter((p) => !p.claimed && now < p.expiry).map((p) => p.holder))
-    await watchRedemptions(covered).catch((e) => console.error(`redemption watch failed: ${e.message}`))
+    const vault = payung
+    queueWatch.set(vault, watchRedemptions(covered)
+      .catch((e) => console.error(`redemption watch failed: ${e.message}`))
+      .finally(() => queueWatch.delete(vault)))
   }
 
   // Read these last: trigger() above also takes a sample. Chain time, not this machine's clock,
   // because poke() checks block.timestamp.
   const [observedAt, { timestamp: now }] = await Promise.all([read('lastObservedAt'), pub.getBlock()])
-  if (now - observedAt >= OBSERVE_INTERVAL) await send('poke', [])
+  if (payung === vaults[0] && now - observedAt >= OBSERVE_INTERVAL) await send('poke', []) // only the vault still selling cover needs vol
 
   if (Date.now() - lastLog > 60_000) {
     lastLog = Date.now()
-    const [vol, gas] = await Promise.all([read('volatility'), pub.getBalance({ address: account.address })])
+    const [vol, gas, gasPrice] = await Promise.all([read('volatility'), pub.getBalance({ address: account.address }), pub.getGasPrice()])
     console.log(`[${new Date().toISOString()}] BTC $${Number(formatUnits(price, 18)).toFixed(0)} · vol ${Number(formatUnits(vol, 16)).toFixed(1)}% · policies ${count} · keeper gas ${formatUnits(gas, 18)} BTC`)
     // An empty keeper fails every trigger quietly; GitHub Actions shows ::warning:: on the run page.
-    if (gas < LOW_GAS && Date.now() - lastGasWarn > 3_600_000) {
+    if (gas < gasPrice * GAS * 100n && Date.now() - lastGasWarn > 3_600_000) { // under 100 transactions left
       lastGasWarn = Date.now()
       console.log(`::warning::Keeper ${account.address} has ${formatUnits(gas, 18)} BTC left for gas. Top it up from faucet.test.mezo.org.`)
     }
@@ -170,7 +179,13 @@ async function tick() {
 }
 
 if (process.argv.includes('--once')) {
-  await tick() // throws -> non-zero exit, so a failing cron run shows red
+  let failed
+  for (const v of vaults) {
+    payung = v
+    await tick().catch((e) => (failed = e)) // every vault gets its pass even if one fails
+  }
+  await Promise.all(queueWatch.values()) // a single pass still finishes its queue check
+  if (failed) throw failed // non-zero exit, so a failing cron run shows red
   process.exit(0)
 }
 
@@ -179,12 +194,15 @@ const stopAt = forIdx > 0 ? Date.now() + Number(process.argv[forIdx + 1]) * 1000
 let ticks = 0
 let failures = 0
 while (Date.now() < stopAt) {
-  ticks++
-  try {
-    await tick()
-  } catch (e) {
-    failures++
-    console.error(e.shortMessage ?? e.message) // stale oracle, RPC hiccup: retry next tick
+  for (const v of vaults) {
+    ticks++
+    payung = v
+    try {
+      await tick()
+    } catch (e) {
+      failures++
+      console.error(`${v}: ${e.shortMessage ?? e.message}`) // stale oracle, RPC hiccup: retry next tick
+    }
   }
   await new Promise((r) => setTimeout(r, POLL_MS))
 }

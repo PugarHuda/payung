@@ -180,8 +180,8 @@ fieldset.field legend { font-size: 0.9rem; color: var(--mist); padding: 0; margi
 .odds line { stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .odds .strike { stroke: var(--turmeric); }
 .odds .liq { stroke: var(--danger); stroke-dasharray: 5 4; }
-.phone { background: var(--card); border-left: 4px solid var(--turmeric); padding: 0.75rem 1rem; margin: 0 0 1.5rem; max-width: 70ch; }
-.phone p { margin: 0.25rem 0; }
+.phone, .swap { background: var(--card); border-left: 4px solid var(--turmeric); padding: 0.75rem 1rem; margin: 0 0 1.5rem; max-width: 70ch; }
+.phone p, .swap p { margin: 0.25rem 0; }
 .phone code { overflow-wrap: anywhere; }
 .alerts { list-style: none; padding: 0; margin: 0.25rem 0 0; font-size: 0.9rem; }
 .alerts li { margin: 0.3rem 0; }

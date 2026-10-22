@@ -38,10 +38,15 @@ test.describe('without a wallet', () => {
     const expected = Number((await page.locator('.expected strong').first().innerText()).replace(/[^\d.]/g, ''))
     expect(expected).toBeGreaterThan(0)
     expect(expected).toBeLessThan(nums.at(-1))
-    // Older events page in from the whole history.
+    // Older events page in from the whole history, 12 at first; a young vault fits on one page.
     const shown = await page.locator('.activity li').count()
-    await page.getByRole('button', { name: /Show older/ }).click()
-    expect(await page.locator('.activity li').count()).toBeGreaterThan(shown)
+    if (shown === 12 && (await page.getByRole('button', { name: /Show older/ }).count())) {
+      await page.getByRole('button', { name: /Show older/ }).click()
+      expect(await page.locator('.activity li').count()).toBeGreaterThan(shown)
+    } else {
+      expect(shown).toBeLessThanOrEqual(12)
+      await expect(page.getByRole('button', { name: /Show older/ })).toHaveCount(0)
+    }
     await expect(page.locator('.history figcaption')).toContainText(/1 pyMUSD: 1\.0000 → \d\.\d{4} MUSD since launch.*at 25 past blocks/)
     await expect(page.locator('.history figcaption')).not.toContainText(/\d{4,}(\.\d+)?% a year/) // no year-long extrapolation of a day
     expect(errors).toEqual([])
@@ -147,6 +152,9 @@ test.describe('without a wallet', () => {
     // Weighed against every redemption Mezo has processed (explorer), not a guess.
     await expect(page.locator('.redemptions')).toHaveText(/^Mezo has processed \d+ redemptions since \w{3} \d{4}, the largest [\d,]+ MUSD, the latest on .+ UTC\. Against today's queue, \d+ of them would have reached your loan\.$/)
     await expect(page.getByRole('button', { name: 'Connect wallet to buy cover' })).toBeVisible()
+    // It still holds cover in the v1 vault: the app says so, and a view offers no Withdraw button.
+    await expect(page.getByText(/live cover.* in Payung v1/)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Withdraw it' })).toHaveCount(0)
     await page.getByRole('button', { name: 'My cover' }).click()
     const rows = page.locator('main.policies tbody tr')
     await expect(rows.first()).toBeVisible()
@@ -469,17 +477,30 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect.poll(rateOf).toBeGreaterThan(oneWeek)
     await page.getByText('2 weeks').click()
 
-    // Buy real 2-week cover with auto-repay, sized to what the vault can still back.
+    // A strike nobody bought yet this period needs 100 MUSD of cover (the vault's anti-squatting rule).
+    const twoWeeks = BigInt(Math.floor(Date.now() / 1000 / 604800) + 2) * 604800n
+    const opened = await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'strikeList', args: [twoWeeks] })
+    const shownStrike = BigInt((await page.locator('.big').first().innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, '')) * 10n ** 18n
+    if (!opened.includes(shownStrike)) {
+      await expect(page.getByText(/Opening a new strike takes at least 100 MUSD/)).toBeVisible()
+      await expect(buy).toBeDisabled()
+    }
+    await cover.fill('100')
+    await expect(page.getByText(/Opening a new strike takes at least/)).toBeHidden()
+    // Buy real 2-week cover with auto-repay.
     await expect(page.getByRole('checkbox')).toBeChecked()
     await expect(buy).toBeEnabled()
+    const owned = (await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [w.account.address] })).length
     await buy.click()
     await expect(page.getByRole('status')).toContainText('Covered.', { timeout: 120_000 })
     await expect(page.getByRole('status').getByRole('link', { name: 'View transaction' })).toHaveAttribute('href', /explorer\.test\.mezo\.org\/tx\/0x/)
 
     // My cover: the new policy is active and Mezo's repay dry-run passes.
     await page.getByRole('button', { name: 'My cover' }).click()
+    // Older cover from earlier runs can look the same: wait until the new policy is listed.
+    await expect(page.locator('main.policies tbody tr')).toHaveCount(owned + 1, { timeout: 60_000 })
     const row = page.locator('tbody tr').first()
-    await expect(row).toContainText('10 MUSD')
+    await expect(row).toContainText('100 MUSD')
     await expect(row).toContainText('Active')
     await expect(row).toContainText('Loan, repay checked', { timeout: 120_000 })
     await expect(page.getByText(/Browser alerts are on/)).toBeVisible()
@@ -487,15 +508,15 @@ test.describe('with a wallet on Mezo testnet', () => {
     const ics = decodeURIComponent((await row.getByRole('link', { name: 'Add to calendar' }).getAttribute('href')).split(',').slice(1).join(','))
     expect(ics).toMatch(/BEGIN:VEVENT\r\n.*DTSTART:\d{8}T000000Z\r\n/s) // Thursday 00:00 UTC
     expect(ics).toContain('TRIGGER:-P1D')
-    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 10 MUSD\)/) // commas escaped per RFC 5545
+    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 100 MUSD\)/) // commas escaped per RFC 5545
     expect(ics.split('\r\n').every((l) => l.length <= 75)).toBe(true) // long lines folded
     const renewUrl = ics.replace(/\r\n /g, '').match(/Renew it for the next week: (\S+)/)[1]
-    expect(renewUrl).toMatch(/\?strike=\d+&cover=10&expiry=\d+$/)
+    expect(renewUrl).toMatch(/\?strike=\d+&cover=100&expiry=\d+$/)
     // Renew: back on Protect with the same strike and cover, the week after this cover ends (week 3).
     const strikeText = (await row.locator('td').first().innerText()).trim()
     await row.getByRole('button', { name: 'Renew for the next week' }).click()
     await expect(page.locator('.big').first()).toContainText(strikeText)
-    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('10')
+    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('100')
     await expect(page.locator('.seg label.on')).toHaveText('3 weeks')
     await page.getByRole('button', { name: 'My cover' }).click()
 

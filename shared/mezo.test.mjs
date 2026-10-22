@@ -44,7 +44,8 @@ test('the explorer fallback reads a mined transaction', async () => {
 // Live check: the explorer's whole-range getLogs returns the vault's cover sales, decoded.
 test('explorerLogs reads every PolicyBought since deployment', async () => {
   const { payungAbi, ADDR } = await import('./mezo.js')
-  const logs = await explorerLogs(ADDR.payung, payungAbi, 'PolicyBought', ADDR.payungBlock)
+  // Payung v1's history no longer grows, so its first sale is a fixed point to check against.
+  const logs = await explorerLogs(ADDR.payungV1, payungAbi, 'PolicyBought', 16259876n)
   assert.ok(logs.length >= 7)
   assert.ok(logs.every((l) => l.eventName === 'PolicyBought' && l.args.premium > 0n && l.timestamp > 0))
   assert.equal(logs[0].transactionHash, '0xa424f08e0c5ec3625a67798a0d84d815d572a502468b25b56a9201f4c41c007c') // first sale on v4
@@ -114,4 +115,16 @@ test('redemptionHistory reads every Redemption Mezo testnet has processed, oldes
   assert.ok(h.length >= 23) // 23 by Oct 2026; history only grows
   assert.ok(h.every((r, i) => r.amount > 0n && r.timestamp > 1.7e9 && (i === 0 || r.timestamp >= h[i - 1].timestamp)))
   assert.ok(h.some((r) => r.amount > 2600n * 10n ** 18n)) // the 2,695 MUSD redemption of Jul 7, 2026
+})
+
+test('btcForMusd: the BTC it picks really buys the MUSD on Mezo Pools, with little to spare (live)', async () => {
+  const { createPublicClient, http } = await import('viem')
+  const { btcForMusd, mezoTestnet, ADDR, poolsAbi } = await import('./mezo.js')
+  const client = createPublicClient({ chain: mezoTestnet, transport: http() })
+  const need = 25n * 10n ** 18n
+  const { btcIn, musdOut, route } = await btcForMusd(client, need)
+  assert.ok(musdOut >= need)
+  assert.ok(musdOut < (need * 103n) / 100n, 'overshoots by more than 3%')
+  const [, check] = await client.readContract({ address: ADDR.poolsRouter, abi: poolsAbi, functionName: 'getAmountsOut', args: [btcIn, route] })
+  assert.equal(check, musdOut)
 })

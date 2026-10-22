@@ -15,8 +15,9 @@ export const mezoTestnet = defineChain({
 })
 
 export const ADDR = {
-  payung: '0xdC66559C75c9950f8869e20A04C14494DF601d4d',
-  payungBlock: 16259876n, // deployment block: share-price history starts here
+  payung: '0x706B5E6F3760eb0c5fe4c726784FbFB269Ac4150', // v2: claim-griefing fix, new-strike minimum
+  payungBlock: 16292068n, // deployment block: share-price history starts here
+  payungV1: '0xdC66559C75c9950f8869e20A04C14494DF601d4d', // v1: its cover still pays out until it expires
   musd: '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503',
   priceFeed: '0x86bCF0841622a5dAC14A313a15f96A95421b9366',
   oracle: '0x7b7c000000000000000000000000000000000015', // PriceFeed.oracle(): Mezo's Skip Connect precompile
@@ -24,6 +25,30 @@ export const ADDR = {
   sigs: '0xD757e3646AF370b15f32EB557F0F8380Df7D639e',
   hintHelpers: '0x4e4cBA3779d56386ED43631b4dCD6d8EacEcBCF6',
   sortedTroves: '0x722E4D24FD6Ff8b0AC679450F3D91294607268fA',
+  btc: '0x7b7C000000000000000000000000000000000000', // native BTC as an ERC-20 (Mezo precompile)
+  poolsRouter: '0x9a1ff7FE3a0F69959A3fBa1F1e5ee18e1A9CD7E9', // Mezo Pools (Velodrome-style)
+  poolsFactory: '0x4947243CC818b627A5D06d14C4eCe7398A23Ce1A',
+}
+
+export const poolsAbi = parseAbi([
+  'function getAmountsOut(uint256 amountIn, (address from, address to, bool stable, address factory)[] routes) view returns (uint256[] amounts)',
+  'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, (address from, address to, bool stable, address factory)[] routes, address to, uint256 deadline) returns (uint256[] amounts)',
+])
+const BTC_TO_MUSD = [{ from: ADDR.btc, to: ADDR.musd, stable: false, factory: ADDR.poolsFactory }]
+
+/// How much BTC to sell on Mezo Pools' BTC/MUSD pool for at least `musdNeeded`: { btcIn, musdOut, route }.
+/// Starts from the pool's own rate and steps up 1% until the real quote (fee and price impact
+/// included) covers the need.
+export async function btcForMusd(client, musdNeeded) {
+  const quote = (btc) => client.readContract({ address: ADDR.poolsRouter, abi: poolsAbi, functionName: 'getAmountsOut', args: [btc, BTC_TO_MUSD] }).then((a) => a[1])
+  const unit = 10n ** 15n // 0.001 BTC
+  let btcIn = (musdNeeded * unit) / (await quote(unit)) + 1n
+  for (let i = 0; i < 20; i++) {
+    const musdOut = await quote(btcIn)
+    if (musdOut >= musdNeeded) return { btcIn, musdOut, route: BTC_TO_MUSD }
+    btcIn = (btcIn * 101n) / 100n + 1n
+  }
+  throw new Error('Mezo Pools has too little MUSD for this swap')
 }
 
 export { payungAbi }
