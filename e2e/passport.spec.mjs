@@ -1,24 +1,25 @@
-// A Bitcoin wallet through Mezo Passport, against Mezo testnet: a real secp256k1 key in Node plays
-// Unisat (BIP-137 signatures, native SegWit testnet address). It connects as the Mezo smart account
-// OrangeKit predicts, reconnects on reload without a prompt, and a transaction attempt reports Mezo's
-// relay refusing this site (OrangeKit sends Passport transactions only through
-// test.mezo.org/api/v2/relay, which rejects other sites' pages), instead of a bare "Failed to fetch".
-//   E2E_KEY=0x... npx playwright test passport
+// A Bitcoin wallet uses Payung through Mezo Passport, for real, on Mezo testnet. A secp256k1 key
+// in Node plays Unisat (BIP-137 signatures, native SegWit testnet address). Its Mezo smart account
+// (an OrangeKit Safe) is deployed and driven through Payung's relayer (api/relay.js, served locally
+// by the Playwright config): it swaps BTC for the premium on Mezo Pools and buys cover from the real
+// vault, every transaction signed by the Bitcoin key and checked by the Safe on-chain.
+//   E2E_KEY=0x... RELAYER_KEY=0x... npx playwright test passport
 import { test, expect } from '@playwright/test'
 import { createPublicClient, createWalletClient, http, parseEther, keccak256, toHex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { btcKey, installUnisat } from './btcwallet.mjs'
-import { mezoTestnet, ADDR, payungAbi, waitForReceipt } from '../shared/mezo.js'
+import { mezoTestnet, ADDR, payungAbi, mezoAbi, waitForReceipt } from '../shared/mezo.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 
 test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
-  test.skip(!KEY, 'set E2E_KEY (a wallet with testnet BTC to fund the smart account)')
+  test.skip(!KEY || !process.env.RELAYER_KEY, 'set E2E_KEY (funds the smart account) and RELAYER_KEY (submits its transactions)')
 
-  test('connects as its smart account, says why the relay refused a transaction, reconnects on reload', async ({ page }) => {
-    test.setTimeout(300_000)
+  test('its smart account swaps on Mezo Pools and buys cover through Payung\'s relayer, signed in Bitcoin; reconnects on reload', async ({ page }) => {
+    test.setTimeout(600_000)
     const errors = []
     page.on('pageerror', (e) => errors.push(e.message))
+    page.on('console', (m) => m.type() === 'warning' && /failed/.test(m.text()) && console.log('PAGE', m.text().slice(0, 800)))
     // The same Bitcoin key (so the same smart account) every run: testnet BTC sent to it isn't lost.
     const key = btcKey(keccak256(toHex(`${KEY}:payung-passport-e2e`)).slice(2))
     const log = await installUnisat(page, key)
@@ -32,30 +33,47 @@ test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
     if ((await pub.getBalance({ address: safe })) < parseEther('0.00001')) {
       const funder = createWalletClient({ account: privateKeyToAccount(KEY), chain: mezoTestnet, transport: http(undefined, { timeout: 60_000 }) })
       expect((await waitForReceipt(pub, await funder.sendTransaction({ to: safe, value: parseEther('0.00002'), gas: 100_000n }))).status).toBe('success')
+      await page.reload()
+      await expect(page.locator('.acct')).toHaveAttribute('title', safe, { timeout: 60_000 })
     }
+    const before = await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [safe] })
     await expect(page.getByText(/This is a smart-contract account/)).toBeVisible()
     await expect(page.getByLabel(/Repay my loan automatically/)).toBeDisabled()
 
-    // The farthest strike (30% under BTC): its premium is cents, so the account's BTC covers the swap.
+    // The farthest strike (30% under BTC): its premium is cents, so a little BTC pays it.
     await page.getByLabel('Cover amount (MUSD)').fill('100')
     await expect(page.getByRole('slider')).toBeEnabled()
     await page.getByRole('slider').focus()
     await page.keyboard.press('Home')
-    await page.getByRole('button', { name: /^Swap 0\.\d+ BTC for MUSD$/ }).click({ timeout: 120_000 })
-    await expect(page.getByRole('alert')).toContainText("Mezo's Passport relay didn't accept the transaction from this site", { timeout: 120_000 })
-    expect(await pub.getCode({ address: safe })).toBeUndefined() // nothing was sent: the account is still undeployed
-    expect((await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [safe] })).length).toBe(0)
+    const signed = () => log.filter((m) => m === 'signMessage').length
+    await expect(page.locator('.quote strong')).toHaveText(/MUSD/, { timeout: 60_000 })
+    const musdHeld = await pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [safe] })
+    if (musdHeld < 10n ** 18n) { // an earlier run may have left it MUSD; otherwise it swaps BTC for the premium
+      await page.getByRole('button', { name: /^Swap 0\.\d+ BTC for MUSD$/ }).click({ timeout: 60_000 })
+      await expect(page.getByRole('status')).toContainText('Swapped BTC for about', { timeout: 300_000 })
+      expect(signed()).toBeGreaterThanOrEqual(1) // the swap (and the BTC approval) signed in Bitcoin
+    }
+    expect((await pub.getCode({ address: safe }))?.length).toBeGreaterThan(2) // deployed through the relayer on first use
 
-    // Reload: the Bitcoin wallet is back, from getAccounts, with no new connect request.
+    const beforeBuy = signed()
+    await page.getByRole('button', { name: /^Buy cover for/ }).click()
+    await expect(page.getByRole('status')).toContainText('Covered.', { timeout: 300_000 })
+    await expect(page.getByRole('status')).toContainText('goes to your wallet') // a smart account can't pre-sign Mezo's repay
+    expect(signed()).toBeGreaterThan(beforeBuy)
+    const ids = await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [safe] })
+    expect(ids.length).toBe(before.length + 1)
+    const p = await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policy', args: [ids.at(-1)] })
+    expect(p.holder).toBe(safe)
+    expect(p.autoRepay).toBe(false)
+
+    // Reload: the Bitcoin wallet is back, from getAccounts, with no new connect request; Disconnect sticks.
     const prompts = log.filter((m) => m === 'requestAccounts').length
     await page.reload()
     await expect(page.locator('.acct')).toHaveAttribute('title', safe, { timeout: 60_000 })
     expect(log.filter((m) => m === 'requestAccounts').length).toBe(prompts)
-    // Disconnect forgets it: no reconnect after the next reload.
     await page.getByRole('button', { name: 'Disconnect' }).click()
     await page.reload()
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
-    await expect(page.locator('.acct')).toHaveCount(0)
     expect(errors).toEqual([])
   })
 })

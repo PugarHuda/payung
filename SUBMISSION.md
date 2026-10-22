@@ -11,7 +11,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 
 **Target group:** Mezo MUSD borrowers who keep BTC long-term and fear a sharp drop (desktop and mobile web, intermediate DeFi users), and MUSD holders who want yield that isn't tied to LP or Stability Pool risk. Track 1: makes MUSD productive capital, and makes Mezo Borrow safer to use at higher LTV.
 
-**Tech stack:** Solidity 0.8.24, Foundry (32 unit/fuzz tests, 5 invariants over 128k random calls, 3 fork tests against the live MUSD contracts, one of them a claim-griefing sweep), Slither (0 findings), node:test unit tests for the payout decision, axe-core, OpenZeppelin ERC-4626, viem, Mezo Pools router (BTC → MUSD for the premium), React + Vite, EIP-6963 wallets, Mezo Passport Bitcoin wallets (OrangeKit), Playwright e2e with a real wallet bridge on testnet and BTC-touch tests on an anvil fork of Mezo (through the app, and the keeper alone), archive reads for share-price history, Node keeper on a GitHub Actions cron, Blockscout API.
+**Tech stack:** Solidity 0.8.24, Foundry (32 unit/fuzz tests, 5 invariants over 128k random calls, 3 fork tests against the live MUSD contracts, one of them a claim-griefing sweep), Slither (0 findings), node:test unit tests for the payout decision, axe-core, OpenZeppelin ERC-4626, viem, Mezo Pools router (BTC → MUSD for the premium), React + Vite, EIP-6963 wallets, Mezo Passport Bitcoin wallets (OrangeKit smart accounts, with Payung's own relayer as a Vercel Function), Playwright e2e with a real wallet bridge on testnet and BTC-touch tests on an anvil fork of Mezo (through the app, and the keeper alone), archive reads for share-price history, Node keeper on a GitHub Actions cron, Blockscout API.
 
 **Track:** Track 1 (DeFi)
 
@@ -22,7 +22,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 **Readiness:** Testnet deployment. Vault v2 `0x706B5E6F3760eb0c5fe4c726784FbFB269Ac4150` (Sourcify-verified) is live with the claim-griefing fix found in our own review (a fork test against the real MUSD contracts showed a caller could starve an auto-repay into a wallet payout). v1 `0xdC66559C75c9950f8869e20A04C14494DF601d4d` (Sourcify-verified) holds the earlier history: deposits, cover purchases, and an auto-repay re-signed after a real nonce change; the keeper still pays its cover. A keeper runs every 5 minutes on GitHub Actions, and CI runs on every push.
 
 **Future milestones:**
-1. Wave 2 (Nov 2–15): capped mainnet vault after an external review. Bitcoin wallets through Mezo Passport sending transactions: they already connect as their Mezo smart account and view their cover, but Mezo's Passport relay refuses other sites' pages today, so we need it opened to Payung or our own relayer for the Safe's `execTransaction`.
+1. Wave 2 (Nov 2–15): capped mainnet vault after an external review. a relayer with per-user rate limits and a gas budget (Bitcoin wallets already buy cover through Mezo Passport today, via Payung's own relayer).
 2. December 2026: redemption-risk cover (redemption queue position as the trigger), partner vault curators.
 3. Q1 2027: cover as an embeddable module offered at borrow time in other Mezo apps.
 

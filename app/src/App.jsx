@@ -455,9 +455,8 @@ export default function App() {
     // its own sendTransaction; writeContract with an address account would ask Mezo's node to sign.
     const hash = btcWallet
       ? await wallet.sendTransaction({ to: address, data: encodeFunctionData({ abi, functionName, args }) }).catch((e) => {
-        // OrangeKit sends through Mezo's relay (test.mezo.org/api/v2/relay), which refuses requests
-        // from other sites' pages (CORS behind Cloudflare); the browser reports only "Failed to fetch".
-        if (e instanceof TypeError) throw new Error("Mezo's Passport relay didn't accept the transaction from this site (it only serves pages Mezo allows), so nothing was sent. Your Bitcoin wallet stays connected for viewing; use an EVM wallet to buy or deposit.")
+        // Sent through Payung's relayer (api/relay.js); the browser says only "Failed to fetch" when it can't reach it.
+        if (e instanceof TypeError) throw new Error("Payung's relayer for Bitcoin wallets can't be reached right now, so nothing was sent. Try again in a minute.")
         throw e
       })
       : await wallet.writeContract({ ...req, gas: GAS })

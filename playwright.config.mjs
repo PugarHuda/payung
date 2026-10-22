@@ -3,6 +3,10 @@
 //   E2E_KEY=0x... npx playwright test
 import { defineConfig } from '@playwright/test'
 
+// With RELAYER_KEY set, the app is built against a local copy of the relayer (e2e/passport.spec.mjs).
+const RELAY = !process.env.E2E_URL && process.env.RELAYER_KEY
+if (RELAY) process.env.VITE_RELAY_URL ??= 'http://localhost:4790/api/relay'
+
 export default defineConfig({
   testDir: 'e2e',
   timeout: 240_000,
@@ -19,5 +23,9 @@ export default defineConfig({
     { name: 'firefox', use: { browserName: 'firefox' }, grep: /without a wallet/ },
     { name: 'webkit', use: { browserName: 'webkit' }, grep: /without a wallet/ },
   ],
-  webServer: process.env.E2E_URL ? undefined : { command: 'npm run build && npm run preview -w app -- --port 4783 --strictPort', url: 'http://localhost:4783/', timeout: 120_000 },
+  webServer: process.env.E2E_URL ? undefined : [
+    { command: 'npm run build && npm run preview -w app -- --port 4783 --strictPort', url: 'http://localhost:4783/', timeout: 120_000 },
+    // Payung's relayer for Bitcoin wallets (api/relay.js), served locally when there is a key for it.
+    ...(RELAY ? [{ command: 'node e2e/relay-server.mjs 4790', url: 'http://localhost:4790/api/relay', timeout: 30_000 }] : []),
+  ],
 })
