@@ -104,6 +104,14 @@ const REVERTS = {
   'Payung: repay failed': "Mezo didn't accept the repay into the loan. Only the cover's owner can take the payout to their wallet in the first 6 hours.",
   'Payung: new strike needs 100 MUSD': 'Nobody has bought this strike yet in this period, and opening a new one takes at least 100 MUSD of cover.',
 }
+// What Payung's relayer for Bitcoin wallets answers (shared/relay.js), in plain words.
+const RELAY_REFUSALS = [
+  [/too many transactions/, 'Too many transactions from this connection in a minute. Wait a moment and try again.'],
+  [/Safe not deployed yet/, 'Your Bitcoin wallet\'s Mezo account is still being set up. Try again in a few seconds.'],
+  [/GS0(2[0-9]|1[0-9])|signature/i, 'Your Bitcoin wallet\'s signature didn\'t match its Mezo account (did you switch accounts in the wallet?). Reconnect and try again.'],
+  [/would revert/, 'Mezo would reject this transaction right now (BTC or the vault may have moved). Check the numbers and try again.'],
+  [/not configured|could not submit/, 'Payung\'s relayer for Bitcoin wallets is unavailable right now. Try again in a minute, or use an EVM wallet.'],
+]
 // OpenZeppelin custom errors carry no reason string, only a name.
 const CUSTOM = {
   ERC4626ExceededMaxWithdraw: 'BTC moved and less is free to withdraw now. Lower the amount or press Max again.',
@@ -114,6 +122,8 @@ const CUSTOM = {
 }
 function explain(e) {
   if (e?.walk?.((x) => x.code === 4001) || /rejected|denied/i.test(e?.message ?? '')) return 'You cancelled the request in your wallet.'
+  const relayed = e?.message?.match(/^Payung's relayer refused the transaction: (.*)$/)?.[1]
+  if (relayed) return RELAY_REFUSALS.find(([re]) => re.test(relayed))?.[1] ?? `Payung's relayer didn't send it (${relayed}).`
   if (/Not enough native token balance/.test(e?.message ?? '')) return 'Your Mezo Passport account needs a little BTC on Mezo to pay the gas. Send some to it (faucet.test.mezo.org on testnet) and try again.'
   if (e?.walk?.((x) => x.name === 'InsufficientFundsError')) return 'Your wallet has too little BTC to pay the gas. Get testnet BTC from the Mezo faucet (faucet.test.mezo.org) and try again.'
   const reason = e?.walk?.((x) => x.reason)?.reason
@@ -357,7 +367,7 @@ export default function App() {
     if (saved?.startsWith('btc:')) {
       import('./passport.js').then(({ reconnectBitcoin }) => reconnectBitcoin(saved.slice(4))).then((s) => {
         if (!s) return
-        setBtcWallet({ client: s.client, disconnect: s.disconnect })
+        setBtcWallet({ client: s.client, disconnect: s.disconnect, watch: s.watch })
         setAccount(s.address)
       }, (e) => console.warn('bitcoin wallet reconnect', e))
       return
@@ -399,16 +409,22 @@ export default function App() {
     setPicking(false)
     try {
       const { connectBitcoin } = await import('./passport.js')
-      const { address, client, disconnect } = await connectBitcoin(id)
+      const { address, client, disconnect, watch } = await connectBitcoin(id)
       try { localStorage.setItem(WALLET_KEY, `btc:${id}`) } catch {}
       setProvider(undefined)
-      setBtcWallet({ client, disconnect })
+      setBtcWallet({ client, disconnect, watch })
       setAccount(address)
       setMe({})
     } catch (e) {
       setNotice({ kind: 'error', text: explain(e) })
     }
   }
+
+  // A Bitcoin wallet that switches accounts would sign for another Mezo account: start over.
+  useEffect(() => btcWallet?.watch?.(() => {
+    disconnect()
+    setNotice({ kind: 'error', text: 'Your Bitcoin wallet switched accounts. Connect again to use the new one.' })
+  }), [btcWallet]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // EIP-747: ask the wallet to list a token, so pyMUSD and MUSD show up next to the user's BTC.
   async function addToken(address, symbol, decimals) {
@@ -625,6 +641,10 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
   const afterRatio = me.hasTrove && strike && coverWei > 0n && me.debt > coverWei ? (me.coll * strike * 100n) / (me.debt - coverWei) / WAD : null
   const repayTooLate = autoRepay && afterRatio != null && afterRatio < MCR
 
+  // Everything that stops a purchase except the premium itself: a swap for the premium is offered
+  // only when paying is all that's missing.
+  const blocked = !canWrite || !quote || tooBig || touched || noRoom || outOfBand || newStrikeTooSmall || !salesOpen || chain.paused || !!coverError
+
   async function buy() {
     await run('buy', async () => {
       // Check the shown premium still holds before asking for signatures: BTC and volatility move.
@@ -760,11 +780,11 @@ function Protect({ chain, me, account, busy, run, write, ensureAllowance, signRe
         </p>
         <Odds btc={btc} price={price} strike={strike} liq={liq} vol={vol} expiry={expiry} />
         {cantPay && <em className="warn">You have {musd(me.bal)}. Borrow or buy MUSD on Mezo to pay the premium.</em>}
-        {cantPay && me.btc > 0n && <SwapForPremium need={(quote.premium * SLIPPAGE) / 100n - me.bal} me={me} price={price} account={account} busy={busy} run={run} write={write} canWrite={canWrite} />}
+        {cantPay && !blocked && me.btc > 0n && <SwapForPremium need={(quote.premium * SLIPPAGE) / 100n - me.bal} me={me} price={price} account={account} busy={busy} run={run} write={write} canWrite={canWrite} />}
         {expiry && !salesOpen && <em className="warn">Cover ending this week stops selling an hour before expiry. Pick 2 weeks or more.</em>}
 
         {account && !watching ? (
-          <button className="primary wide" disabled={!canWrite || !quote || tooBig || touched || noRoom || outOfBand || newStrikeTooSmall || cantPay || !salesOpen || chain.paused || !!coverError || !!busy} onClick={buy}>
+          <button className="primary wide" disabled={blocked || cantPay || !!busy} onClick={buy}>
             {busy === 'buy' ? 'Opening umbrella…' : `Buy cover for ${quote ? musd(quote.premium) : '…'}`}
           </button>
         ) : (

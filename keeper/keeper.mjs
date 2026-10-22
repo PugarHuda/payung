@@ -74,10 +74,11 @@ let lastGasWarn = 0
 
 async function tick() {
   let failed = 0
-  const [price, first, weeks] = await Promise.all([
+  const [price, first, weeks, head] = await Promise.all([
     pub.readContract({ address: ADDR.priceFeed, abi: mezoAbi, functionName: 'fetchPrice' }),
     read('currentExpiry'),
     read('MAX_WEEKS'),
+    pub.getBlock(), // chain time, not this machine's clock: expiry and the fallback window are on-chain rules
   ])
 
   // A touch hits every live expiry that sold the strike; each is its own trigger (and reward).
@@ -97,17 +98,18 @@ async function tick() {
   const ids = Array.from({ length: Number(count - from) }, (_, i) => from + BigInt(i))
   const policies = await Promise.all(ids.map((id) => read('policy', [id])))
   const hit = await Promise.all(policies.map((p) => (p.claimed ? [0n, false] : read('strikes', [p.expiry, p.strike])))) // one multicall
-  const nowSec = BigInt(Math.floor(Date.now() / 1000))
+  const nowSec = head.timestamp
   for (const [i, p] of policies.entries()) {
     const id = ids[i]
     const triggered = hit[i][1]
-    // Done for good: paid, or expired untouched (a strike can't be triggered after expiry).
-    if (p.claimed || (!triggered && nowSec >= p.expiry)) {
+    // Done for good: paid, or expired untouched (a strike can't be triggered after expiry). A minute
+    // of margin: a trigger mined in expiry's last seconds is still read on the next pass.
+    if (p.claimed || (!triggered && nowSec >= p.expiry + 60n)) {
       if (allPaidBelow === id) allPaidBelow = id + 1n
       continue
     }
     if (!triggered) {
-      if (BigInt(Math.floor(Date.now() / 1000)) < p.expiry && price * 100n <= p.strike * ALERT_BAND) {
+      if (nowSec < p.expiry && price * 100n <= p.strike * ALERT_BAND) {
         await alert(p.holder, {
           tag: `near-${payung.toLowerCase()}-${id}`,
           priority: 5, // a loan may be minutes from liquidation: ring through Do Not Disturb
@@ -152,7 +154,7 @@ async function tick() {
   // holds up a trigger, a payout or a volatility sample; at most one per vault at a time.
   if (!queueWatch.has(payung) && Date.now() - (lastQueueCheck.get(payung) ?? 0) > QUEUE_CHECK_MS) {
     lastQueueCheck.set(payung, Date.now())
-    const now = BigInt(Math.floor(Date.now() / 1000))
+    const now = nowSec
     const covered = new Set(policies.filter((p) => !p.claimed && now < p.expiry).map((p) => p.holder))
     const vault = payung
     queueWatch.set(vault, watchRedemptions(covered)

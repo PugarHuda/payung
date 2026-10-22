@@ -32,11 +32,13 @@ export function btcKey(secret = secp256k1.utils.randomPrivateKey()) {
   }
 }
 
-/** Injects `window.unisat` into the page, answered by `key` in Node. Returns a log of requests. */
+/** Injects `window.unisat` into the page, answered by `key` in Node. Returns a log of requests;
+ *  set `log.reject = true` to make the wallet refuse to sign, as a user pressing Cancel does. */
 export async function installUnisat(page, key) {
   const log = []
   await page.exposeFunction('__unisat', async (method, arg) => {
     log.push(method)
+    if (method === 'signMessage' && log.reject) throw new Error('User rejected the request.')
     if (method === 'signMessage') return key.signMessage(arg)
     if (method === 'getPublicKey') return key.publicKey
     return [key.address] // requestAccounts, getAccounts

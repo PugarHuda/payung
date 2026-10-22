@@ -42,7 +42,9 @@ const BTC_TO_MUSD = [{ from: ADDR.btc, to: ADDR.musd, stable: false, factory: AD
 export async function btcForMusd(client, musdNeeded) {
   const quote = (btc) => client.readContract({ address: ADDR.poolsRouter, abi: poolsAbi, functionName: 'getAmountsOut', args: [btc, BTC_TO_MUSD] }).then((a) => a[1])
   const unit = 10n ** 15n // 0.001 BTC
-  let btcIn = (musdNeeded * unit) / (await quote(unit)) + 1n
+  const rate = await quote(unit)
+  if (rate === 0n) throw new Error('Mezo Pools has too little MUSD for this swap')
+  let btcIn = (musdNeeded * unit) / rate + 1n
   for (let i = 0; i < 20; i++) {
     const musdOut = await quote(btcIn)
     if (musdOut >= musdNeeded) return { btcIn, musdOut, route: BTC_TO_MUSD }

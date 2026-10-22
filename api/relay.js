@@ -2,7 +2,7 @@
 // shared/relay.js for what it accepts). GET: the relayer's address and gas, for the app and for
 // whoever tops it up. Vercel Function; the key is the RELAYER_KEY environment variable.
 import { createPublicClient, createWalletClient, http, formatEther } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+import { privateKeyToAccount, nonceManager } from 'viem/accounts'
 import { mezoTestnet } from '../shared/mezo.js'
 import { relay } from '../shared/relay.js'
 
@@ -17,12 +17,14 @@ function cors(request) {
 }
 const json = (request, body, status = 200) => Response.json(body, { status, headers: cors(request) })
 
+let cached // one account (and nonce manager) per instance
 function clients() {
+  if (cached) return cached
   const key = process.env.RELAYER_KEY
   if (!key) return null
   const transport = http(process.env.MEZO_RPC, { timeout: 60_000 })
-  const account = privateKeyToAccount(key.startsWith('0x') ? key : `0x${key}`)
-  return { pub: createPublicClient({ chain: mezoTestnet, transport }), wallet: createWalletClient({ account, chain: mezoTestnet, transport }) }
+  const account = privateKeyToAccount(key.startsWith('0x') ? key : `0x${key}`, { nonceManager })
+  return (cached = { pub: createPublicClient({ chain: mezoTestnet, transport }), wallet: createWalletClient({ account, chain: mezoTestnet, transport }) })
 }
 
 // ponytail: per-instance memory, so a best-effort brake (Fluid Compute reuses instances), not a
@@ -35,8 +37,9 @@ function limited(request) {
   const now = Date.now()
   if (seen.size > 10_000) seen.clear()
   const recent = (seen.get(ip) ?? []).filter((t) => now - t < 60_000)
+  if (recent.length >= LIMIT) return true // refused requests don't count, so spam can't grow the list
   seen.set(ip, [...recent, now])
-  return recent.length >= LIMIT
+  return false
 }
 
 export function OPTIONS(request) {

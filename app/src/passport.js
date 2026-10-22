@@ -12,8 +12,11 @@ import { mezoTestnet } from '../../shared/mezo.js'
 
 const FACTORIES = { unisat: getOrangeKitUnisatConnector, okx: getOrangeKitOKXConnector, xverse: getOrangeKitXverseConnector }
 const RPC = mezoTestnet.rpcUrls.default.http[0]
-// The Vercel deployment serves the relayer; the GitHub Pages mirror and local runs call it there.
-export const RELAY = import.meta.env.VITE_RELAY_URL ?? 'https://payung-ecru.vercel.app/api/relay'
+// Vercel serves the relayer next to the app (production, previews, any custom domain); the GitHub
+// Pages mirror and local runs call the production one, which allows them through CORS.
+const HOSTED_ELSEWHERE = location.hostname === 'pugarhuda.github.io' || location.hostname === 'localhost'
+export const RELAY = import.meta.env.VITE_RELAY_URL ?? (HOSTED_ELSEWHERE ? 'https://payung-ecru.vercel.app/api/relay' : '/api/relay')
+const INJECTED = { unisat: () => window.unisat, okx: () => window.okxwallet?.bitcoin, xverse: () => undefined }
 
 async function connector(id) {
   const c = FACTORIES[id]({ rpcUrl: RPC, chainId: mezoTestnet.id })()({ chains: [mezoTestnet], emitter: { emit() {} } })
@@ -22,7 +25,7 @@ async function connector(id) {
 }
 
 /** The account's viem client: reads over Mezo's RPC, writes as Bitcoin-signed Safe transactions. */
-async function session(c, address) {
+async function session(id, c, address) {
   const btc = c.getBitcoinProvider()
   const [btcAddress, publicKey] = await Promise.all([btc.getAddress(), btc.getPublicKey()])
   let owner // the Bitcoin owner as OrangeKit's factory knows it; the relayer checks the Safe against it
@@ -46,14 +49,21 @@ async function session(c, address) {
   const client = createWalletClient({ chain: mezoTestnet, account, transport: http(RPC) }).extend(() => ({
     sendTransaction: ({ to, value, data }) => smart.sendTransaction(to, (value ?? 0n).toString(), data ?? '0x', btcAddress, publicKey, (m) => btc.signMessage(m)),
   }))
-  return { address, client, disconnect: () => c.disconnect() }
+  // Unisat and OKX announce account switches; calls `fn` once on a switch, returns an unsubscribe.
+  const watch = (fn) => {
+    const injected = INJECTED[id]?.()
+    const on = () => fn()
+    injected?.on?.('accountsChanged', on)
+    return () => injected?.removeListener?.('accountsChanged', on)
+  }
+  return { address, client, watch, disconnect: () => c.disconnect() }
 }
 
 /** Connect a Bitcoin wallet; resolves to the Mezo smart-account address and a viem wallet client. */
 export async function connectBitcoin(id) {
   const c = await connector(id)
   const { accounts } = await c.connect({ chainId: mezoTestnet.id })
-  return session(c, accounts[0])
+  return session(id, c, accounts[0])
 }
 
 /** The same, without a prompt, if the wallet still lets this site read its account; else null. */
@@ -61,5 +71,5 @@ export async function reconnectBitcoin(id) {
   const c = await connector(id)
   if (!(await c.isAuthorized())) return null
   const [address] = await c.getAccounts()
-  return session(c, address)
+  return session(id, c, address)
 }

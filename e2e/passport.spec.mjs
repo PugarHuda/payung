@@ -65,6 +65,14 @@ test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
     }
     expect((await pub.getCode({ address: safe }))?.length).toBeGreaterThan(2) // deployed through the relayer on first use
 
+    // Cancel in the Bitcoin wallet: plain words, and nothing reaches the chain.
+    const policiesNow = (await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [safe] })).length
+    log.reject = true
+    await page.getByRole('button', { name: /^Buy cover for/ }).click()
+    await expect(page.getByRole('alert')).toHaveText('You cancelled the request in your wallet.', { timeout: 120_000 })
+    expect((await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'policiesOf', args: [safe] })).length).toBe(policiesNow)
+    log.reject = false
+
     const beforeBuy = signed()
     await page.getByRole('button', { name: /^Buy cover for/ }).click()
     await expect(page.getByRole('status')).toContainText('Covered.', { timeout: 300_000 })

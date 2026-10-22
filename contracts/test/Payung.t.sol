@@ -203,6 +203,35 @@ contract PayungTest is Test {
         assertEq(vault.totalOwed(), 0);
     }
 
+    /// Past the repay signature's deadline there is no repay to protect: anyone pays the wallet at once.
+    function test_afterSigDeadlineAnyonePaysTheWalletAtOnce() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, true); // signature valid until E + 1 day
+        vm.warp(E - 1 hours);
+        feed.set(85_000e18);
+        vault.trigger(E, 90_000e18);
+        vm.warp(E + 1 days + 1);
+        uint256 before = musd.balanceOf(alice);
+        vault.claim(id, address(0), address(0)); // a stranger, well inside FALLBACK_DELAY of the trigger
+        assertEq(musd.balanceOf(alice) - before, 1_000e18);
+    }
+
+    /// The holder may take a failed repay to the wallet the moment the strike is touched.
+    function test_holderTakesFailedRepayAtOnce() public {
+        uint256 id = _buy(alice, 90_000e18, 1_000e18, true);
+        feed.set(85_000e18);
+        vault.trigger(E, 90_000e18);
+        sigs.setFail(true);
+        vm.prank(alice);
+        vault.claim(id, address(0), address(0));
+        (,,, bool claimed,,,,) = _p(id);
+        assertTrue(claimed);
+    }
+
+    function _p(uint256 id) internal view returns (address, uint64, bool, bool, uint256, uint256, uint256, bytes memory) {
+        Payung.Policy memory p = vault.policy(id);
+        return (p.holder, p.expiry, p.autoRepay, p.claimed, p.strike, p.cover, p.sigDeadline, p.signature);
+    }
+
     function test_newStrikeNeedsMinimumCover() public {
         vm.prank(alice);
         vm.expectRevert("Payung: new strike needs 100 MUSD");

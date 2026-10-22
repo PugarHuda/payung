@@ -19,17 +19,35 @@ test.describe('a BTC-only wallet on Mezo testnet', () => {
     const errors = []
     page.on('pageerror', (e) => errors.push(e.message))
     const pub = createPublicClient({ chain: mezoTestnet, transport: http(undefined, { timeout: 60_000 }) })
+    // Nothing to buy when the vault is full: skip before spending testnet BTC on a fresh wallet.
+    const vaultRoom = await pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })
+    test.skip(vaultRoom < 10n * 10n ** 18n, `the vault can back only ${vaultRoom / 10n ** 18n} MUSD more right now`)
     const w = await installWallet(page, generatePrivateKey())
     const me = w.account.address
     const funder = createWalletClient({ account: privateKeyToAccount(KEY), chain: mezoTestnet, transport: http(undefined, { timeout: 60_000 }) })
-    expect((await waitForReceipt(pub, await funder.sendTransaction({ to: me, value: parseEther('0.00015'), gas: 100_000n }))).status).toBe('success')
+    expect((await waitForReceipt(pub, await funder.sendTransaction({ to: me, value: parseEther('0.00002'), gas: 100_000n }))).status).toBe('success')
     const musdOf = () => pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [me] })
     expect(await musdOf()).toBe(0n)
 
     await page.goto('./')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.locator('.acct')).toContainText(me.slice(0, 6))
-    await page.getByLabel('Cover amount (MUSD)').fill('100')
+    // More than the vault can back: Buy is blocked anyway, so no swap is offered for it.
+    await page.getByLabel('Cover amount (MUSD)').fill('1000000')
+    await expect(page.getByText(/The vault can back|fully booked/)).toBeVisible()
+    await expect(page.locator('.swap')).toHaveCount(0)
+    // The farthest strike, sized to what the vault can still back (a strike already open this
+    // period takes any cover from 10 MUSD, a new one needs 100).
+    await expect(page.getByRole('slider')).toBeEnabled()
+    await page.getByRole('slider').focus()
+    await page.keyboard.press('Home')
+    const read = (functionName, args = []) => pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName, args })
+    const [capacity, expiry] = await Promise.all([read('coverCapacity'), read('currentExpiry')])
+    const strike = BigInt((await page.locator('.big').first().innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, '')) * 10n ** 18n
+    const open = (await read('strikeList', [expiry])).includes(strike)
+    const cover = capacity >= 100n * 10n ** 18n ? 100n : open ? capacity / 10n ** 18n : 0n
+    test.skip(cover < 10n, `the vault can back only ${capacity / 10n ** 18n} MUSD more right now`)
+    await page.getByLabel('Cover amount (MUSD)').fill(String(cover))
     await expect(page.getByText(/You have 0 MUSD/)).toBeVisible()
     // A real quote from the router, with the pool's rate against Mezo's oracle.
     await expect(page.locator('.swap')).toContainText(/swap 0\.\d+ BTC for [\d.]+ MUSD on Mezo Pools/)

@@ -36,3 +36,24 @@ test('refuses anything that is not the named owner\'s Safe, or calls outside Pay
   assert.equal(await relayProblem(client, RELAYER, { to: safe, data: exec(ADDR.musd), owner }), 'Safe not deployed yet')
   assert.equal(await relayProblem(client, RELAYER, { to: 'nope', data: '0x', owner }), 'bad request')
 })
+
+test('inside a Safe transaction, only what using Payung needs: no transfers, no foreign spenders, swaps pay the account', async () => {
+  const { innerCallProblem } = await import('./relay.js')
+  const { payungAbi, poolsAbi } = await import('./mezo.js')
+  const safe = '0x00000000000000000000000000000000000000aa'
+  const other = '0x00000000000000000000000000000000000000bb'
+  const erc20 = parseAbi(['function approve(address,uint256)', 'function transfer(address,uint256)'])
+  const enc = (abi, functionName, args) => encodeFunctionData({ abi, functionName, args })
+  const route = [{ from: ADDR.btc, to: ADDR.musd, stable: false, factory: ADDR.poolsFactory }]
+  assert.equal(innerCallProblem(safe, ADDR.payung, enc(payungAbi, 'claim', [1n, zeroAddress, zeroAddress])), null)
+  assert.equal(innerCallProblem(safe, ADDR.payungV1, enc(payungAbi, 'withdraw', [1n, safe, safe])), null)
+  assert.equal(innerCallProblem(safe, ADDR.payung, '0xdeadbeef'), 'not a Payung function')
+  assert.equal(innerCallProblem(safe, ADDR.musd, enc(erc20, 'approve', [ADDR.payung, 1n])), null)
+  assert.equal(innerCallProblem(safe, ADDR.musd, enc(erc20, 'approve', [other, 1n])), 'approves a spender outside Payung')
+  assert.equal(innerCallProblem(safe, ADDR.musd, enc(erc20, 'transfer', [other, 1n])), 'only approvals on MUSD and BTC')
+  assert.equal(innerCallProblem(safe, ADDR.btc, enc(erc20, 'approve', [ADDR.poolsRouter, 1n])), null)
+  assert.equal(innerCallProblem(safe, ADDR.btc, enc(erc20, 'approve', [ADDR.payung, 1n])), 'approves a spender outside Payung')
+  assert.equal(innerCallProblem(safe, ADDR.poolsRouter, enc(poolsAbi, 'swapExactTokensForTokens', [1n, 1n, route, safe, 1n])), null)
+  assert.equal(innerCallProblem(safe, ADDR.poolsRouter, enc(poolsAbi, 'swapExactTokensForTokens', [1n, 1n, route, other, 1n])), 'the swap must pay the account itself')
+  assert.equal(innerCallProblem(safe, ADDR.troveManager, '0x'), 'calls a contract outside Payung')
+})
