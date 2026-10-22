@@ -26,7 +26,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 2. December 2026: redemption-risk cover (redemption queue position as the trigger), partner vault curators.
 3. Q1 2027: cover as an embeddable module offered at borrow time in other Mezo apps.
 
-**Team:** Pugar Huda Mantoro, solo builder (product, contracts, app). X: [@bangdropid](https://x.com/bangdropid)
+**Team:** Pugar Huda Mantoro, solo builder (product, contracts, app). X: [@bangdropid](https://x.com/bangdropid) · GitHub: [PugarHuda](https://github.com/PugarHuda)
 
 **Links:** GitHub https://github.com/PugarHuda/payung · Live app https://payung-ecru.vercel.app · Video _URL_ · Deck _URL_
 
