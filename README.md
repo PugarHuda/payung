@@ -179,4 +179,4 @@ The app reads the vault address from `shared/mezo.js` (`?vault=0x…` overrides 
 
 ## Team
 
-- _Your name_: product, contracts, app ([X](https://x.com/) · [LinkedIn](https://linkedin.com/))
+- Pugar Huda Mantoro: solo builder (product, contracts, app) ([X](https://x.com/bangdropid))
