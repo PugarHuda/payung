@@ -334,7 +334,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     await expect(page.getByText(/This is a smart-contract account/)).toBeVisible()
     await expect(page.getByLabel(/Repay my loan automatically/)).toBeDisabled()
     await page.getByRole('button', { name: 'My cover' }).click()
-    await expect(page.getByRole('button', { name: 'Send a test alert' })).toBeDisabled() // BTC signatures aren't EIP-191
+    await expect(page.getByRole('button', { name: 'Send a test alert' })).toBeEnabled() // signed in Bitcoin (BIP-137), checked against the account
     await page.getByRole('button', { name: 'Disconnect' }).click()
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
     expect(errors).toEqual([])

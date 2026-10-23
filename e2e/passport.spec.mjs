@@ -40,6 +40,14 @@ test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
     await expect(page.getByText(/This is a smart-contract account/)).toBeVisible()
     await expect(page.getByLabel(/Repay my loan automatically/)).toBeDisabled()
 
+    // Phone alerts: a test alert signed by the Bitcoin key (BIP-137), read back from ntfy.sh and
+    // traced through OrangeKit's factory to this very account.
+    await page.getByRole('button', { name: 'My cover' }).click()
+    await page.getByRole('button', { name: 'Send a test alert' }).click()
+    await expect(page.getByRole('status')).toContainText('signed by your Bitcoin wallet', { timeout: 60_000 })
+    await expect(page.locator('.alerts li', { hasText: 'Payung test alert' }).first()).toContainText('Signed by you', { timeout: 30_000 })
+    await page.getByRole('button', { name: 'Protect my loan' }).click()
+
     // The farthest strike (30% under BTC): its premium is cents, so a little BTC pays it.
     await page.getByLabel('Cover amount (MUSD)').fill('100')
     await expect(page.getByRole('slider')).toBeEnabled()

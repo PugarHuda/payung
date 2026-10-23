@@ -6,16 +6,10 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { bech32 } from 'bech32'
+import { messageHash } from '../shared/btc.js'
 
-const varint = (n) => (n < 0xfd ? Uint8Array.of(n) : Uint8Array.of(0xfd, n & 0xff, n >> 8))
+export { messageHash }
 const concat = (...a) => Uint8Array.from(a.flatMap((x) => [...x]))
-const MAGIC = new TextEncoder().encode('\x18Bitcoin Signed Message:\n')
-
-/** Bitcoin's signed-message hash: sha256d(magic || varint(len) || message). */
-export function messageHash(message) {
-  const m = new TextEncoder().encode(message)
-  return sha256(sha256(concat(MAGIC, varint(m.length), m)))
-}
 
 export function btcKey(secret = secp256k1.utils.randomPrivateKey()) {
   const publicKey = secp256k1.getPublicKey(secret, true)

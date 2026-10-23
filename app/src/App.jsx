@@ -555,7 +555,7 @@ export default function App() {
 
       {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
-      {tab === 'policies' && <Policies {...ctx} signer={btcWallet ? undefined : { signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
+      {tab === 'policies' && <Policies {...ctx} signer={btcWallet ? { bitcoin: true, signMessage: ({ message }) => wallet.account.signMessage({ message }) } : { signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
         setPrefill({ strike: p.strike, cover: formatUnits(p.cover, 18), expiry: p.expiry + WEEK })
         setTab('protect')
       }} />}
@@ -1031,7 +1031,8 @@ function describe({ eventName, args }) {
 
 function Policies({ chain, me, account, busy, run, write, signRepay, connect, canWrite, watching, alerts, enableAlerts, renew, signer }) {
   const [phone, setPhone] = useState() // alerts on this account's ntfy topic, each with who signed it
-  const loadPhone = useCallback(() => account && readAlerts(account).then(setPhone, () => setPhone(null)), [account])
+  // pub: a Bitcoin-signed alert is checked against the Mezo Passport account its key owns.
+  const loadPhone = useCallback(() => account && readAlerts(account, undefined, pub).then(setPhone, () => setPhone(null)), [account])
   useEffect(() => {
     loadPhone()
     const t = setInterval(loadPhone, 30_000)
@@ -1083,10 +1084,10 @@ function Policies({ chain, me, account, busy, run, write, signRepay, connect, ca
         </p>
         <p>
           <a href={`${NTFY}/${topicFor(account)}`} target="_blank" rel="noreferrer">Open my alerts in ntfy</a>{' '}
-          <button className="small" disabled={!canWrite || !signer || !!busy} title={signer ? undefined : 'Bitcoin wallets sign in a format the alert check cannot read yet'} onClick={() => run('ntfy', async () => {
+          <button className="small" disabled={!canWrite || !!busy} onClick={() => run('ntfy', async () => {
             await notify(account, { title: 'Payung test alert', message: 'Alerts about your cover will arrive here.', tag: 'test' }, signer)
             setTimeout(loadPhone, 2000) // ntfy.sh shows a new message within a second or two
-            return { text: `Test alert sent to ${topicFor(account)}, signed by your wallet. If ntfy is subscribed, it is on your phone now.` }
+            return { text: `Test alert sent to ${topicFor(account)}, signed by your ${signer.bitcoin ? 'Bitcoin ' : ''}wallet. If ntfy is subscribed, it is on your phone now.` }
           })}>{busy === 'ntfy' ? 'Sending…' : 'Send a test alert'}</button>
         </p>
         <p className="fine">
