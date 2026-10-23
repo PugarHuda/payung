@@ -13,6 +13,9 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: read # the token can't push, tag or touch issues; the keys are secrets, not token scopes
+
 concurrency:
   group: testnet-e2e # one wallet, one nonce sequence
   cancel-in-progress: false
@@ -30,7 +33,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: foundry-rs/foundry-toolchain@v1 # anvil, for the BTC-touch fork test
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1 (v1.9.2), pinned: this job holds secrets. Anvil, for the BTC-touch fork test
       - run: npm ci
       - name: Real testnet transactions, Chromium
         # The filter comes in through the environment, never pasted into the script (no injection).
