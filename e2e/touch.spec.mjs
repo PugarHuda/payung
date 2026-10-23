@@ -125,7 +125,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
   })
 
   test('touch, trigger for the reward, pay into the real trove', async ({ page }) => {
-    test.setTimeout(600_000)
+    test.setTimeout(1_200_000) // every fork block reads state over a remote RPC
     page.on('console', (m) => m.type() === 'warning' && console.log('PAGE', m.text().slice(0, 300)))
     const w = await installWallet(page, KEY, RPC)
     const me = w.account.address
@@ -168,7 +168,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     const expected = await fork.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'triggerReward', args: [strikeCover] })
     const musdBefore = await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [me] })
     await trigger.click()
-    await expect(page.getByRole('status')).toContainText(`Triggered $${strikeUsd.toLocaleString('en-US')}`)
+    await expect(page.getByRole('status')).toContainText(`Triggered $${strikeUsd.toLocaleString('en-US')}`, { timeout: 240_000 }) // a fork reads every slot over RPC
     const reward = (await fork.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [me] })) - musdBefore
     expect(reward).toBe(expected) // 0.1% of the strike's cover, paid to whoever triggered
     await expect(trigger).toBeHidden()
