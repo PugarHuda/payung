@@ -23,7 +23,7 @@ const procs = []
 const APP_NTFY = `payung-e2e-app-${Date.now().toString(36)}-` // the app's alerts in this run's own ntfy namespace
 
 const start = (cmd, env = {}) => {
-  const p = spawn(cmd, { shell: true, stdio: 'ignore', env: { ...process.env, ...env } })
+  const p = spawn(cmd, { shell: true, stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, ...env } }) // errors reach the test log
   procs.push(p)
   return p
 }

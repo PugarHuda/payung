@@ -452,10 +452,15 @@ test.describe('with a wallet on Mezo testnet', () => {
     await expect(page.getByText(/Earned so far: [+−][\d.,]+ MUSD on [\d,]+ MUSD deposited/)).toBeVisible({ timeout: 60_000 })
     await page.getByRole('button', { name: 'Protect my loan' }).click()
     await cover.fill('25')
-    // A strike under the liquidation line: the app warns that Mezo would refuse the repay.
+    // The lowest strike: if the loan would still sit under 110% there after a 25 MUSD repay, the app
+    // warns that Mezo would refuse the repay; a healthier loan gets no warning. Worked out from the
+    // loan itself, since its ratio changes between runs.
     await slider.focus()
     await page.keyboard.press('Home')
-    await expect(page.getByText(/Mezo would refuse the repay/)).toBeVisible()
+    const low = BigInt((await page.locator('.big').first().innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, '')) * 10n ** 18n
+    const [coll, principal, interest] = await w.pub.readContract({ address: ADDR.troveManager, abi: mezoAbi, functionName: 'getEntireDebtAndColl', args: [w.account.address] })
+    const refused = (coll * low * 100n) / (principal + interest - 25n * 10n ** 18n) / 10n ** 18n < 110n
+    await expect(page.getByText(/Mezo would refuse the repay/)).toHaveCount(refused ? 1 : 0)
     // ~8-9% below spot, above this loan's liquidation line: the warning clears.
     await page.keyboard.press('End')
     for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowLeft')
