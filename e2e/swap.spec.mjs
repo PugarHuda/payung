@@ -36,8 +36,7 @@ test.describe('a BTC-only wallet on Mezo testnet', () => {
     await page.getByLabel('Cover amount (MUSD)').fill('1000000')
     await expect(page.getByText(/The vault can back|fully booked/)).toBeVisible()
     await expect(page.locator('.swap')).toHaveCount(0)
-    // The farthest strike, sized to what the vault can still back (a strike already open this
-    // period takes any cover from 10 MUSD, a new one needs 100).
+    // The farthest strike.
     await expect(page.getByRole('slider')).toBeEnabled()
     await page.getByRole('slider').focus()
     await page.keyboard.press('Home')
@@ -45,8 +44,9 @@ test.describe('a BTC-only wallet on Mezo testnet', () => {
     const [capacity, expiry] = await Promise.all([read('coverCapacity'), read('currentExpiry')])
     const strike = BigInt((await page.locator('.big').first().innerText()).match(/\$([\d,]+)/)[1].replace(/,/g, '')) * 10n ** 18n
     const open = (await read('strikeList', [expiry])).includes(strike)
-    const cover = capacity >= 100n * 10n ** 18n ? 100n : open ? capacity / 10n ** 18n : 0n
-    test.skip(cover < 10n, `the vault can back only ${capacity / 10n ** 18n} MUSD more right now`)
+    // Each run buys real cover from the shared vault: the 10 MUSD minimum on an open strike, 100 to open one.
+    const cover = open ? 10n : 100n
+    test.skip(capacity < cover * 10n ** 18n, `the vault can back only ${capacity / 10n ** 18n} MUSD more right now`)
     await page.getByLabel('Cover amount (MUSD)').fill(String(cover))
     await expect(page.getByText(/You have 0 MUSD/)).toBeVisible()
     // A real quote from the router, with the pool's rate against Mezo's oracle.

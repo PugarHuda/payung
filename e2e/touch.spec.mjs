@@ -14,7 +14,7 @@ import { readAlerts } from '../shared/notify.js'
 
 const KEY = process.env.E2E_KEY ?? process.env.PRIVATE_KEY
 const RPC = 'http://127.0.0.1:8786'
-const APP = 'http://localhost:4784/'
+const APP = 'http://127.0.0.1:4784/' // explicit IPv4: in a container "localhost" may resolve to ::1 only
 // anvil's first dev account, funded on every fork: plays an outside keeper
 const ANVIL_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
 const ANVIL_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
@@ -23,7 +23,7 @@ const procs = []
 const APP_NTFY = `payung-e2e-app-${Date.now().toString(36)}-` // the app's alerts in this run's own ntfy namespace
 
 const start = (cmd, env = {}) => {
-  const p = spawn(cmd, { shell: true, stdio: ['ignore', 'ignore', 'inherit'], env: { ...process.env, ...env } }) // errors reach the test log
+  const p = spawn(cmd, { shell: true, stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, ...env } }) // output reaches the test log
   procs.push(p)
   return p
 }
@@ -53,7 +53,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     await fork.request({ method: 'anvil_mine', params: ['0x1'] }) // Mezo headers lack blob-gas fields; a local block has them
     await fork.request({ method: 'anvil_setCode', params: [ADDR.priceFeed, RETURN_SLOT0] })
     execSync('npx vite build --outDir dist-fork', { cwd: 'app', stdio: 'ignore', env: { ...process.env, VITE_MEZO_RPC: RPC, VITE_NTFY_PREFIX: APP_NTFY } })
-    start('npm run preview -w app -- --outDir dist-fork --port 4784 --strictPort', { VITE_MEZO_RPC: RPC }) // CSP lets the app reach the fork
+    start('npm run preview -w app -- --outDir dist-fork --host 127.0.0.1 --port 4784 --strictPort', { VITE_MEZO_RPC: RPC }) // CSP lets the app reach the fork
     await until(async () => (await fetch(APP)).ok)
   })
 

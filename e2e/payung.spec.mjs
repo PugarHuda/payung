@@ -490,7 +490,12 @@ test.describe('with a wallet on Mezo testnet', () => {
       await expect(page.getByText(/Opening a new strike takes at least 100 MUSD/)).toBeVisible()
       await expect(buy).toBeDisabled()
     }
-    await cover.fill('100')
+    // Every run buys real cover from the shared vault: take 10 MUSD on a strike already open, 100
+    // only to open a new one, and stop here (not fail) when the vault can't back it.
+    const size = opened.includes(shownStrike) ? 10 : 100
+    const room = await w.pub.readContract({ address: ADDR.payung, abi: payungAbi, functionName: 'coverCapacity' })
+    test.skip(room < BigInt(size) * 10n ** 18n, `the vault can back only ${room / 10n ** 18n} MUSD more right now`)
+    await cover.fill(String(size))
     await expect(page.getByText(/Opening a new strike takes at least/)).toBeHidden()
     // Buy real 2-week cover with auto-repay.
     await expect(page.getByRole('checkbox')).toBeChecked()
@@ -505,7 +510,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     // Older cover from earlier runs can look the same: wait until the new policy is listed.
     await expect(page.locator('main.policies tbody tr')).toHaveCount(owned + 1, { timeout: 60_000 })
     const row = page.locator('tbody tr').first()
-    await expect(row).toContainText('100 MUSD')
+    await expect(row).toContainText(`${size} MUSD`)
     await expect(row).toContainText('Active')
     await expect(row).toContainText('Loan, repay checked', { timeout: 120_000 })
     await expect(page.getByText(/Browser alerts are on/)).toBeVisible()
@@ -513,15 +518,16 @@ test.describe('with a wallet on Mezo testnet', () => {
     const ics = decodeURIComponent((await row.getByRole('link', { name: 'Add to calendar' }).getAttribute('href')).split(',').slice(1).join(','))
     expect(ics).toMatch(/BEGIN:VEVENT\r\n.*DTSTART:\d{8}T000000Z\r\n/s) // Thursday 00:00 UTC
     expect(ics).toContain('TRIGGER:-P1D')
-    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, 100 MUSD\)/) // commas escaped per RFC 5545
+    expect(ics).toMatch(/SUMMARY:Payung cover ends \(\$\d+\\,\d{3} strike\\, \d+ MUSD\)/) // commas escaped per RFC 5545
+    expect(ics).toContain(` ${size} MUSD)`)
     expect(ics.split('\r\n').every((l) => l.length <= 75)).toBe(true) // long lines folded
     const renewUrl = ics.replace(/\r\n /g, '').match(/Renew it for the next week: (\S+)/)[1]
-    expect(renewUrl).toMatch(/\?strike=\d+&cover=100&expiry=\d+$/)
+    expect(renewUrl).toMatch(new RegExp(`\\?strike=\\d+&cover=${size}&expiry=\\d+$`))
     // Renew: back on Protect with the same strike and cover, the week after this cover ends (week 3).
     const strikeText = (await row.locator('td').first().innerText()).trim()
     await row.getByRole('button', { name: 'Renew for the next week' }).click()
     await expect(page.locator('.big').first()).toContainText(strikeText)
-    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('100')
+    await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue(String(size))
     await expect(page.locator('.seg label.on')).toHaveText('3 weeks')
     await page.getByRole('button', { name: 'My cover' }).click()
 
