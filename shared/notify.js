@@ -9,7 +9,6 @@
 // it signs BIP-137 (tag btcsig-…): the reader recovers the Bitcoin owner and asks OrangeKit's factory
 // which Safe that owner has; that Safe is the signer.
 import { getAddress, parseAbi, recoverMessageAddress } from 'viem'
-import { bitcoinOwner } from './btc.js'
 
 const ORANGEKIT_FACTORY = '0x7E80bd5A2E8Fca0B160254D43aC9f43AC2cC1052'
 const factoryAbi = parseAbi(['function predictAddresses(bytes20) view returns (address safe, address owner)'])
@@ -49,6 +48,7 @@ export async function readAlerts(address, prefix, client) {
     let signer = null
     if (signature) signer = await recoverMessageAddress({ message: text, signature }).catch(() => null)
     else if (btcSignature && client) {
+      const { bitcoinOwner } = await import('./btc.js') // secp256k1 recovery: loaded only when a Bitcoin-signed alert shows up
       const owner = bitcoinOwner(text, btcSignature)
       if (owner) signer = await client.readContract({ address: ORANGEKIT_FACTORY, abi: factoryAbi, functionName: 'predictAddresses', args: [owner] }).then(([safe]) => getAddress(safe), () => null)
     }

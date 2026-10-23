@@ -1,0 +1,48 @@
+name: Testnet e2e
+
+# The end-to-end tests that send real Mezo testnet transactions: buying, re-arming and underwriting
+# with a wallet, a BTC-only wallet swapping on Mezo Pools, a Bitcoin wallet buying through Mezo
+# Passport and Payung's relayer, and a BTC touch (trigger, payout into the loan, the keeper alone) on
+# an anvil fork. Run by hand (Actions > Testnet e2e > Run workflow): each run spends a little
+# testnet BTC and MUSD, so it has no schedule. Keys are repository secrets for testnet wallets only.
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: 'Only tests whose title matches (e.g. "Mezo Passport"); empty runs them all'
+        required: false
+        default: ''
+
+concurrency:
+  group: testnet-e2e # one wallet, one nonce sequence
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble # keep equal to @playwright/test's version
+      options: --user 1001
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: foundry-rs/foundry-toolchain@v1 # anvil, for the BTC-touch fork test
+      - run: npm ci
+      - name: Real testnet transactions, Chromium
+        # The filter comes in through the environment, never pasted into the script (no injection).
+        run: npx playwright test --project chromium ${GREP:+-g "$GREP"}
+        env:
+          GREP: ${{ inputs.grep }}
+          E2E_CHANNEL: chromium
+          E2E_KEY: ${{ secrets.E2E_KEY }}
+          RELAYER_KEY: ${{ secrets.RELAYER_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
