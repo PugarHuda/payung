@@ -1,0 +1,23 @@
+# Weekly update PRs, grouped so they don't pile up. The Actions entry also moves the SHA pins
+# (foundry-toolchain is pinned to a commit because a workflow with secrets uses it).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      # A security fix arrives on its own; everything else in one PR a week.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Keep the Playwright CI image tag and @playwright/test in step by hand.
+      - dependency-name: '@playwright/test'

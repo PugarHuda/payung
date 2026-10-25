@@ -259,6 +259,21 @@ test.describe('without a wallet', () => {
     }
   })
 
+  test('has no WCAG A/AA violations with a real wallet\'s loan, cover and alerts on screen (axe-core)', async ({ page }) => {
+    // The e2e wallet: a loan (ratio, liquidation line, redemption queue), live cover in v2 and v1,
+    // the policy table with its pills and buttons, and the phone-alert list.
+    await page.goto('./?address=0xe42F6c4b72577CE2A64D583CF2f33a2D729c9C81')
+    await expect(page.locator('.facts div', { hasText: 'Redemption queue' })).toBeVisible()
+    await expect(page.getByText(/in Payung v1/)).toBeVisible()
+    for (const tab of ['Protect my loan', 'Earn by underwriting', 'My cover']) {
+      await page.getByRole('button', { name: tab }).click()
+      if (tab === 'My cover') await expect(page.locator('main.policies tbody tr').first()).toBeVisible()
+      if (tab === 'Earn by underwriting') await expect(page.locator('.activity li').first()).toBeVisible()
+      const { violations } = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze()
+      expect(violations.map((v) => `${tab}: ${v.id} (${v.nodes.length}) ${v.help} @ ${v.nodes[0]?.target}`)).toEqual([])
+    }
+  })
+
   test('tabs work from the keyboard with a visible focus ring', async ({ page }) => {
     await page.goto('./')
     const tab = page.getByRole('button', { name: 'Earn by underwriting' })

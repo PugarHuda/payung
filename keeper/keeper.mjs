@@ -48,7 +48,7 @@ async function send(functionName, args) {
 }
 
 const scanFrom = new Map() // vault => policies below this index are done
-let lastLog = 0
+const lastLog = new Map() // vault => last status line, so every vault shows up in the log
 const lastQueueCheck = new Map()
 const queueWatch = new Map() // vault => redemption-queue check in flight
 const QUEUE_CHECK_MS = 10 * 60_000 // the queue moves with loans, not with every price tick
@@ -167,10 +167,10 @@ async function tick() {
   const [observedAt, { timestamp: now }] = await Promise.all([read('lastObservedAt'), pub.getBlock()])
   if (payung === vaults[0] && now - observedAt >= OBSERVE_INTERVAL) await send('poke', []) // only the vault still selling cover needs vol
 
-  if (Date.now() - lastLog > 60_000) {
-    lastLog = Date.now()
+  if (Date.now() - (lastLog.get(payung) ?? 0) > 60_000) {
+    lastLog.set(payung, Date.now())
     const [vol, gas, gasPrice] = await Promise.all([read('volatility'), pub.getBalance({ address: account.address }), pub.getGasPrice()])
-    console.log(`[${new Date().toISOString()}] BTC $${Number(formatUnits(price, 18)).toFixed(0)} · vol ${Number(formatUnits(vol, 16)).toFixed(1)}% · policies ${count} · keeper gas ${formatUnits(gas, 18)} BTC`)
+    console.log(`[${new Date().toISOString()}] ${payung.slice(0, 6)}…${payung.slice(-4)} · BTC $${Number(formatUnits(price, 18)).toFixed(0)} · vol ${Number(formatUnits(vol, 16)).toFixed(1)}% · policies ${count} · keeper gas ${formatUnits(gas, 18)} BTC`)
     // An empty keeper fails every trigger quietly; GitHub Actions shows ::warning:: on the run page.
     if (gas < gasPrice * GAS * 100n && Date.now() - lastGasWarn > 3_600_000) { // under 100 transactions left
       lastGasWarn = Date.now()
