@@ -28,7 +28,7 @@ async function caption(text) {
     if (!bar) {
       bar = document.createElement('div')
       bar.id = 'demo-caption'
-      bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;padding:14px 28px;background:rgba(19,32,43,0.92);color:#f6f3ec;font:600 20px/1.35 system-ui,sans-serif;text-align:center'
+      bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;padding:14px 28px;background:rgba(25,11,7,0.9);color:#fff3e6;font:600 20px/1.35 system-ui,sans-serif;text-align:center'
       document.body.appendChild(bar)
     }
     bar.textContent = t
@@ -83,7 +83,7 @@ await page.locator('.phone').scrollIntoViewIfNeeded().catch(() => {})
 await caption('Signed phone alerts through ntfy, even with the page closed. Bitcoin wallets sign theirs with BIP-137 through Mezo Passport.')
 await pause(7000)
 
-await page.evaluate(() => window.scrollTo(0, 0))
+await page.locator('.horizon').scrollIntoViewIfNeeded()
 await caption('Live on Mezo testnet, Sourcify-verified, watched by a keeper. Payung: keep your Bitcoin dry.')
 await pause(6000)
 
