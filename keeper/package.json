@@ -13,7 +13,7 @@
   "type": "module",
   "dependencies": {
     "@noble/curves": "^1.9.1",
-    "@noble/hashes": "^1.8.0",
+    "@noble/hashes": "^2.4.0",
     "viem": "^2.57.8"
   }
 }
