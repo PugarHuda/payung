@@ -1177,7 +1177,7 @@ function calendar(p) {
 /** How likely is a touch: the on-chain-vol model next to what BTC actually did on Mezo's oracle,
  *  with the 30-day path drawn against the strike and the liquidation line. */
 function Odds({ btc, price, strike, liq, vol, expiry }) {
-  if (btc === undefined) return <p className="fine">Reading 30 days of BTC from Mezo's oracle…</p>
+  if (btc === undefined) return <p className="fine odds-wait">Reading 30 days of BTC from Mezo's oracle…</p>
   if (!btc?.length || !price || !strike || !expiry || vol == null) return null
   const drop = 1 - Number(strike) / Number(price)
   const seconds = Number(expiry - nowSec())

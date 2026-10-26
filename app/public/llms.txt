@@ -1,0 +1,21 @@
+# Payung
+
+> Liquidation cover for Mezo MUSD borrowers, live on Mezo testnet (chain 31611). A borrower buys one-to-four-week cover in MUSD; if Mezo's BTC price touches the strike, the cover is paid straight into their Mezo loan through `repayMUSDWithSignature` (or to their wallet). MUSD holders fund the cover in an ERC-4626 vault (pyMUSD) and earn the premiums.
+
+The app reads everything live from Mezo testnet. `?address=0x…` shows any wallet's loan, cover and alerts read-only. Nothing in the app asks for a signature without a wallet connected.
+
+## Contracts (Mezo testnet, Sourcify-verified)
+
+- [Payung vault v2](https://explorer.test.mezo.org/address/0x706B5E6F3760eb0c5fe4c726784FbFB269Ac4150): `0x706B5E6F3760eb0c5fe4c726784FbFB269Ac4150`, sells cover now
+- [Payung vault v1](https://explorer.test.mezo.org/address/0xdC66559C75c9950f8869e20A04C14494DF601d4d): `0xdC66559C75c9950f8869e20A04C14494DF601d4d`, earlier vault; its cover still pays out until it expires
+
+## How it works
+
+- [README](https://github.com/PugarHuda/payung#readme): the mechanism, the Mezo contracts it uses, the security model, known limits and every test
+- [Source](https://github.com/PugarHuda/payung): Solidity (Foundry), React app, keeper, relayer
+- [Demo video](https://payung-ecru.vercel.app/payung-demo.mp4): 72 seconds of the live app
+
+## Optional
+
+- [Relayer status](https://payung-ecru.vercel.app/api/relay): the relayer that submits Mezo Passport (Bitcoin wallet) transactions, and its gas
+- [GitHub Pages mirror](https://pugarhuda.github.io/payung/)

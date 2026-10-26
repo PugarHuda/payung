@@ -80,7 +80,8 @@ main { padding-top: 12px; }
 /* Protect: shaft on the left, decision on the right */
 .protect { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 56px; align-items: start; }
 .gauge { width: 100%; height: auto; display: block; }
-.gauge.empty { color: var(--mist); padding: 2rem 0; }
+.gauge.empty { color: var(--mist); padding: 2rem 0; aspect-ratio: 250 / 400; } /* the gauge's own shape, so nothing jumps when it draws */
+.odds-wait { min-height: 170px; } /* about the chart and its caption, held while history loads */
 .gauge .shaft { fill: var(--card); stroke: var(--line); }
 .gauge .drop { stroke: var(--rain); stroke-width: 1.6; stroke-linecap: round; opacity: 0.55; }
 .gauge .canopy path { fill: var(--turmeric); }
