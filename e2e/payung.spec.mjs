@@ -72,7 +72,8 @@ test.describe('without a wallet', () => {
     await page.goto('./')
     const caption = page.locator('.odds figcaption')
     const chance = async () => {
-      const m = (await caption.innerText()).match(/about (under 0\.1|[\d.]+)%/)
+      // "about 2.4%", or just "under 0.1%" when the chance is that small (calm vol, few days left)
+      const m = (await caption.innerText()).match(/left: (?:about )?(under 0\.1|[\d.]+)%/)
       return m[1] === 'under 0.1' ? 0 : Number(m[1])
     }
     await expect(caption).toContainText(/Over the last 30 days on Mezo's oracle, BTC fell [\d.]+% or more within .* in \d+ of \d+ overlapping stretches/, { timeout: 60_000 })
