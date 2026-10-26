@@ -12,8 +12,6 @@
   "dependencies": {
     "@mezo-org/orangekit": "^1.0.0-beta.40",
     "@mezo-org/orangekit-smart-account": "^1.0.0-beta.24",
-    "@noble/curves": "^1.9.1",
-    "@noble/hashes": "^1.8.0",
     "buffer": "^6.0.3",
     "process": "^0.11.10",
     "react": "^19.3.1",

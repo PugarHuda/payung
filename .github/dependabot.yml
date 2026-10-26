@@ -24,3 +24,6 @@ updates:
       # @mezo-org/orangekit (Mezo Passport) declares a peer dependency on wagmi ^2.
       - dependency-name: wagmi
         update-types: ['version-update:semver-major']
+      # shared/btc.js uses the noble copies viem brings (resolved from the repo root): move with viem.
+      - dependency-name: '@noble/*'
+        update-types: ['version-update:semver-major']
