@@ -29,7 +29,7 @@ test.describe('a BTC-only wallet on Mezo testnet', () => {
     const musdOf = () => pub.readContract({ address: ADDR.musd, abi: mezoAbi, functionName: 'balanceOf', args: [me] })
     expect(await musdOf()).toBe(0n)
 
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.locator('.acct')).toContainText(me.slice(0, 6))
     // More than the vault can back: Buy is blocked anyway, so no swap is offered for it.

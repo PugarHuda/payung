@@ -25,7 +25,7 @@ test.describe('a Bitcoin wallet through Mezo Passport on Mezo testnet', () => {
     const log = await installUnisat(page, key)
     const pub = createPublicClient({ chain: mezoTestnet, transport: http(undefined, { timeout: 60_000 }) })
 
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await page.getByRole('button', { name: /Unisat via Mezo Passport/ }).click()
     await expect(page.locator('.acct')).toHaveAttribute('title', /^0x[0-9a-fA-F]{40}$/, { timeout: 60_000 })

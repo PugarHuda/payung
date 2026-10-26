@@ -81,7 +81,14 @@ function linkPrefill() {
 // (for an advisor, a teammate, or a judge looking at real policies). Nothing can be signed in it.
 const watchParam = new URLSearchParams(location.search).get('address')
 const WATCH = watchParam && isAddress(watchParam) ? watchParam : undefined
-const renewLink = (p) => `${location.origin}${location.pathname}?strike=${p.strike / WAD}&cover=${formatUnits(p.cover, 18)}&expiry=${p.expiry + WEEK}`
+// A plain visit opens on the landing page; links into the app (a view, a renewal, #app) and
+// returning wallets go straight to it.
+const startTab = () => {
+  if (location.search || location.hash === '#app') return 'protect'
+  try { if (localStorage.getItem(WALLET_KEY)) return 'protect' } catch {}
+  return 'home'
+}
+const renewLink =(p) => `${location.origin}${location.pathname}?strike=${p.strike / WAD}&cover=${formatUnits(p.cover, 18)}&expiry=${p.expiry + WEEK}`
 const txLink = (hash) => <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer">View transaction</a>
 
 const REVERTS = {
@@ -182,7 +189,8 @@ export default function App() {
   const [picking, setPicking] = useState(false)
   const [account, setAccount] = useState(WATCH)
   const [chainId, setChainId] = useState()
-  const [tab, setTab] = useState('protect')
+  const [tab, setTab] = useState(startTab)
+  const enter = () => setTab((t) => (t === 'home' ? 'protect' : t)) // connecting from the landing page opens the app
   const [chain, setChain] = useState({})
   const [me, setMe] = useState({})
   const [busy, setBusy] = useState('')
@@ -398,6 +406,7 @@ export default function App() {
       try { localStorage.setItem(WALLET_KEY, w.info.rdns ?? w.info.uuid) } catch {}
       setProvider(w.provider)
       setAccount(addr)
+      enter()
       setChainId(await client.getChainId())
       await switchChain(client)
     } catch (e) {
@@ -415,6 +424,7 @@ export default function App() {
       setBtcWallet({ client, disconnect, watch })
       setAccount(address)
       setMe({})
+      enter()
     } catch (e) {
       setNotice({ kind: 'error', text: explain(e) })
     }
@@ -502,7 +512,10 @@ export default function App() {
   return (
     <div className="shell">
       <header className="top">
-        <a className="brand" href="./">
+        <a className="brand" href="./" onClick={(e) => {
+          e.preventDefault()
+          setTab('home')
+        }}>
           <Umbrella /> Payung
         </a>
         <nav aria-label="Sections">
@@ -553,6 +566,10 @@ export default function App() {
       {chain.recovery && <p className="banner error">Mezo is in recovery mode: the system collateral ratio is {pct(chain.tcr, 0)}, under 150%. Loans under 150% can be liquidated.</p>}
       {notice && <p className={`banner ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text} {notice.hash && txLink(notice.hash)}</p>}
 
+      {tab === 'home' && <Landing chain={chain} go={(k) => {
+        setTab(k)
+        window.scrollTo(0, 0)
+      }} />}
       {tab === 'protect' && <Protect key={`${account}-${prefill?.strike}-${prefill?.expiry}`} {...ctx} prefill={prefill} btc={btc} />}
       {tab === 'underwrite' && <Underwrite {...ctx} />}
       {tab === 'policies' && <Policies {...ctx} signer={btcWallet ? { bitcoin: true, signMessage: ({ message }) => wallet.account.signMessage({ message }) } : { signMessage: ({ message }) => wallet.signMessage({ account, message }) }} alerts={alerts} enableAlerts={enableAlerts} renew={(p) => {
@@ -1273,7 +1290,91 @@ function Line({ y, label, value, cls }) {
   )
 }
 
-/** The card's horizon: a desert at sunset, a paper umbrella (payung) planted over a Bitcoin. Decoration. */
+const SHOWCASE = '0xe42F6c4b72577CE2A64D583CF2f33a2D729c9C81' // the team's wallet: a Mezo loan with cover
+
+/** The front page: what Payung is, live numbers from Mezo, and the two ways in. */
+function Landing({ chain, go }) {
+  const open = chain.strikes?.filter((s) => !s.triggered && nowSec() < s.expiry).reduce((t, s) => t + s.cover, 0n)
+  return (
+    <main className="landing">
+      <section className="hero">
+        <p className="eyebrow">Liquidation cover for Mezo borrowers</p>
+        <h1>Keep your Bitcoin dry.</h1>
+        <p className="lede">
+          Mezo lets you borrow MUSD against your Bitcoin without selling it, but a sharp fall can still liquidate the loan. Payung sells cover for one to four weeks: if BTC touches your strike, MUSD is paid straight into your loan before the liquidation line.
+        </p>
+        <div className="cta">
+          <button className="primary" onClick={() => go('protect')}>Protect my loan</button>
+          <button onClick={() => go('underwrite')}>Earn by underwriting</button>
+        </div>
+        <p className="fine">Live on Mezo testnet. <a href={`./?address=${SHOWCASE}`}>See a covered loan</a>, read-only, no wallet needed.</p>
+      </section>
+      {/* the payung over a Bitcoin, in the rain of a falling price */}
+      <svg className="hero-art" viewBox="-150 -125 300 275" aria-hidden="true" focusable="false">
+        <circle cx="0" cy="10" r="128" fill="#f8cf9c" opacity="0.55" />
+        <g stroke="#c27a45" strokeWidth="3" strokeLinecap="round" opacity="0.6">
+          {[[-130, -60], [-100, -95], [-60, -105], [70, -100], [110, -80], [135, -40], [-140, -10], [140, 10]].map(([x, y]) => <line key={`${x}${y}`} x1={x} y1={y} x2={x - 6} y2={y + 18} />)}
+        </g>
+        <path d="M-6 0 L2 118" stroke="#3a170a" strokeWidth="5" strokeLinecap="round" />
+        <path d="M-120 18 Q-110 -58 -4 -66 Q102 -58 116 18 Q96 4 76 20 Q56 4 36 20 Q16 4 -4 20 Q-24 4 -44 20 Q-64 4 -84 20 Q-102 4 -120 18Z" fill="#eb6919" />
+        <path d="M-4 -66 Q-30 -20 -44 20 M-4 -66 Q-4 -20 -4 20 M-4 -66 Q24 -20 36 20 M-4 -66 Q-70 -30 -84 20 M-4 -66 Q62 -30 76 20" fill="none" stroke="#a73513" strokeWidth="2.2" opacity="0.7" />
+        <circle cx="-4" cy="-68" r="5" fill="#a73513" />
+        <circle cx="40" cy="104" r="26" fill="#f89737" stroke="#a73513" strokeWidth="3" />
+        <text x="40" y="113" textAnchor="middle" fontFamily="Georgia, serif" fontWeight="700" fontSize="28" fill="#5f2110">₿</text>
+      </svg>
+
+      <dl className="facts stats" aria-label="Live from Mezo">
+        <div><dt>BTC on Mezo's price feed</dt><dd>{chain.price === null ? '—' : usd(chain.price)}</dd></div>
+        <div><dt>Underwriting vault</dt><dd>{musd(chain.nav, 0)}</dd></div>
+        <div><dt>Open cover</dt><dd>{musd(open, 0)}</dd></div>
+        <div><dt>BTC volatility (on-chain)</dt><dd>{pct(chain.vol, 0)}</dd></div>
+      </dl>
+
+      <section aria-labelledby="how">
+        <h2 id="how">How it works</h2>
+        <ol className="steps">
+          <li><strong>Pick a strike</strong>Just above your loan's real liquidation line, read live from Mezo, recovery mode included.</li>
+          <li><strong>Sign once, pay a premium</strong>Mezo's own repay signature and a few MUSD, priced from BTC volatility the contract measures itself.</li>
+          <li><strong>BTC touches the strike</strong>On Mezo's price feed, the one that decides liquidations. Anyone can trigger it and earn a reward; a keeper watches every 10 seconds.</li>
+          <li><strong>Your loan is repaid</strong>Through Mezo's repay with signature, while you're offline. No trove migration, no reserve of your own.</li>
+        </ol>
+      </section>
+
+      <div className="sides">
+        <section aria-labelledby="for-borrowers">
+          <h2 id="for-borrowers">For borrowers</h2>
+          <ul>
+            <li>Borrow at a higher loan-to-value without watching the price all night.</li>
+            <li>See your liquidation line, your place in the redemption queue and the odds of a touch before you buy.</li>
+            <li>Bitcoin wallets buy through Mezo Passport; a BTC-only wallet swaps for the premium on Mezo Pools.</li>
+          </ul>
+          <button className="primary" onClick={() => go('protect')}>Protect my loan</button>
+        </section>
+        <section aria-labelledby="for-underwriters">
+          <h2 id="for-underwriters">For MUSD holders</h2>
+          <ul>
+            <li>Deposit MUSD into an ERC-4626 vault and earn the premiums: a yield that isn't LP or Stability Pool risk.</li>
+            <li>Every policy is fully backed, and open cover is capped at half the vault: the most it can lose.</li>
+            <li>A stress table shows what each BTC drop would pay out, before you deposit.</li>
+          </ul>
+          <button onClick={() => go('underwrite')}>Earn by underwriting</button>
+        </section>
+      </div>
+
+      <section aria-labelledby="mezo">
+        <h2 id="mezo">Built on Mezo, not next to it</h2>
+        <ul className="chips">
+          {['PriceFeed', 'repayMUSDWithSignature', 'TroveManager', 'SortedTroves', 'HintHelpers', 'Mezo Pools', 'Mezo Passport'].map((m) => <li key={m}>{m}</li>)}
+        </ul>
+        <p className="fine">
+          The vault is <a href={`${EXPLORER}/address/${PAYUNG}`} target="_blank" rel="noreferrer">verified on Mezo's explorer</a>; unit, fuzz, invariant and fork tests against the live MUSD contracts are in the <a href="https://github.com/PugarHuda/payung" target="_blank" rel="noreferrer">source</a>.
+        </p>
+      </section>
+    </main>
+  )
+}
+
+/** The card's horizon:a desert at sunset, a paper umbrella (payung) planted over a Bitcoin. Decoration. */
 function Horizon() {
   return (
     <svg className="horizon" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMax slice" aria-hidden="true" focusable="false">

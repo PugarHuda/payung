@@ -141,7 +141,7 @@ test.describe('a BTC touch on a fork of Mezo testnet', () => {
     const strikeUsd = Number(policy.strike / 10n ** 18n)
 
     await setPrice(String(strikeUsd - 500)) // BTC dips $500 under the strike
-    await page.goto(APP)
+    await page.goto(`${APP}#app`)
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.locator('.acct')).toBeVisible()
     await expect(page.getByRole('img', { name: new RegExp(`BTC \\$${(strikeUsd - 500).toLocaleString('en-US')}`) })).toBeVisible()

@@ -11,7 +11,7 @@ test.describe('without a wallet', () => {
   test('reads the live vault and explains how to connect', async ({ page }) => {
     const errors = []
     page.on('pageerror', (e) => errors.push(e.message))
-    await page.goto('./')
+    await page.goto('./#app')
     await expect(page.getByRole('heading', { name: /Open an umbrella/ })).toBeVisible()
     await expect(page.getByRole('img', { name: /BTC \$[\d,]+, strike \$[\d,]+/ })).toBeVisible() // price shaft from Mezo's feed
     await expect(page.getByText(/Premium for the whole period/)).toBeVisible()
@@ -69,7 +69,7 @@ test.describe('without a wallet', () => {
   })
 
   test('touch odds: on-chain-vol model and a backtest over 30 days of Mezo oracle history', async ({ page }) => {
-    await page.goto('./')
+    await page.goto('./#app')
     const caption = page.locator('.odds figcaption')
     const chance = async () => {
       // "about 2.4%", or just "under 0.1%" when the chance is that small (calm vol, few days left)
@@ -94,7 +94,7 @@ test.describe('without a wallet', () => {
 
   test('runs under a strict CSP with no violations and refuses to be framed', async ({ page, baseURL }) => {
     // A page that asks for wallet signatures must not be framable (clickjacking).
-    const res = await page.goto('./')
+    const res = await page.goto('./#app')
     const h = res.headers()
     expect(h['content-security-policy']).toContain("frame-ancestors 'none'")
     expect(h['content-security-policy']).toContain("script-src 'self';")
@@ -127,7 +127,7 @@ test.describe('without a wallet', () => {
   test('says so when Mezo RPC or explorer is down, and recovers', async ({ page }) => {
     // RPC down: a banner, and no made-up numbers (the share price stays unknown).
     await page.route(/rpc\.test\.mezo\.org/, (r) => r.abort())
-    await page.goto('./')
+    await page.goto('./#app')
     await expect(page.getByRole('alert')).toContainText("Can't reach Mezo's RPC", { timeout: 40_000 })
     await page.getByRole('button', { name: 'Earn by underwriting' }).click()
     await expect(page.locator('.facts div', { hasText: '1 pyMUSD' }).locator('dd')).toHaveText('…')
@@ -190,7 +190,7 @@ test.describe('without a wallet', () => {
     let release
     const gate = new Promise((r) => (release = r))
     await page.route(/rpc\.test\.mezo\.org/, async (r) => (await gate, r.continue()))
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByLabel('Cover amount (MUSD)').fill('40')
     release()
     await expect(page.locator('.gauge-col svg')).toBeVisible({ timeout: 40_000 })
@@ -198,9 +198,28 @@ test.describe('without a wallet', () => {
     await expect(page.getByLabel('Cover amount (MUSD)')).toHaveValue('40')
   })
 
+  test('a plain visit opens on the landing page with live Mezo numbers, and its buttons lead into the app', async ({ page }) => {
+    await page.goto('./')
+    await expect(page.getByRole('heading', { level: 1, name: 'Keep your Bitcoin dry.' })).toBeVisible()
+    const stats = page.getByLabel('Live from Mezo')
+    await expect(stats.locator('div', { hasText: 'BTC on Mezo' })).toContainText(/\$[\d,]+/)
+    await expect(stats.locator('div', { hasText: 'Underwriting vault' })).toContainText('MUSD')
+    const { violations } = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze()
+    expect(violations.map((v) => `landing: ${v.id} (${v.nodes.length}) ${v.help}`)).toEqual([])
+    for (const width of [375, 1280]) {
+      await page.setViewportSize({ width, height: 800 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth), `landing overflows at ${width}px`).toBeLessThanOrEqual(0)
+    }
+    await page.locator('.hero').getByRole('button', { name: 'Protect my loan' }).click()
+    await expect(page.getByRole('heading', { name: /Open an umbrella/ })).toBeVisible()
+    await page.getByRole('link', { name: 'Payung' }).click() // the brand leads back to the front page
+    await page.locator('.sides').getByRole('button', { name: 'Earn by underwriting' }).click()
+    await expect(page.getByRole('heading', { name: /Earn MUSD/ })).toBeVisible()
+  })
+
   test('fits a phone screen without sideways scrolling', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 800 })
-    await page.goto('./')
+    await page.goto('./#app')
     await expect(page.getByRole('img', { name: /^BTC \$/ })).toBeVisible()
     for (const tab of ['Protect my loan', 'Earn by underwriting', 'My cover']) {
       await page.getByRole('button', { name: tab }).click()
@@ -251,7 +270,7 @@ test.describe('without a wallet', () => {
   })
 
   test('has no WCAG A/AA violations on any tab (axe-core)', async ({ page }) => {
-    await page.goto('./')
+    await page.goto('./#app')
     await expect(page.locator('.quote strong')).toHaveText(/MUSD/)
     for (const tab of ['Protect my loan', 'Earn by underwriting', 'My cover']) {
       await page.getByRole('button', { name: tab }).click()
@@ -276,7 +295,7 @@ test.describe('without a wallet', () => {
   })
 
   test('tabs work from the keyboard with a visible focus ring', async ({ page }) => {
-    await page.goto('./')
+    await page.goto('./#app')
     const tab = page.getByRole('button', { name: 'Earn by underwriting' })
     await tab.focus()
     await page.keyboard.press('Enter')
@@ -292,7 +311,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
     const errors = []
     page.on('pageerror', (e) => errors.push(e.message))
     const w = await installWallet(page, generatePrivateKey())
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.locator('.acct')).toContainText(w.account.address.slice(0, 6))
     // Starts on Ethereum without Mezo: the account shows first, then the switch fails (4902) and Mezo is added.
@@ -342,7 +361,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
       const accounts = ['tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx']
       window.unisat = { requestAccounts: async () => accounts, getAccounts: async () => accounts, getPublicKey: async () => '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' }
     })
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await page.getByRole('button', { name: /Unisat via Mezo Passport/ }).click()
     // The account is the smart account OrangeKit predicts on Mezo testnet, not the Bitcoin address.
@@ -359,7 +378,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
   test('the wallet picker takes focus and closes with Escape', async ({ page }) => {
     await installWallet(page, generatePrivateKey())
     await page.addInitScript(() => { window.unisat = { requestAccounts: async () => [], getAccounts: async () => [] } })
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     const picker = page.getByRole('dialog', { name: 'Choose a wallet' })
     await expect(picker.getByRole('button', { name: 'E2E Wallet' })).toBeFocused()
@@ -370,7 +389,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
 
   test('declining the network switch says so and asks nothing more', async ({ page }) => {
     const w = await installWallet(page, generatePrivateKey(), undefined, { rejectSwitch: true })
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.getByRole('alert')).toHaveText('You cancelled the request in your wallet.')
     await expect(page.getByText('Your wallet is on another network.')).toBeVisible()
@@ -379,7 +398,7 @@ test.describe('without a wallet key: a brand-new empty wallet', () => {
 
   test('a connect request the user rejects says so and leaves the app usable', async ({ page }) => {
     await installWallet(page, generatePrivateKey(), undefined, { rejectConnect: true })
-    await page.goto('./')
+    await page.goto('./#app')
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
     await expect(page.getByRole('alert')).toHaveText('You cancelled the request in your wallet.')
     await expect(page.getByRole('banner').getByRole('button', { name: 'Connect wallet' })).toBeVisible()
@@ -397,7 +416,7 @@ test.describe('with a wallet on Mezo testnet', () => {
     page.on('pageerror', (e) => errors.push(e.message))
     await context.grantPermissions(['notifications'])
     const w = await installWallet(page, KEY)
-    await page.goto('./')
+    await page.goto('./#app')
 
     // Connect: wallet starts on Ethereum mainnet without Mezo; the app adds and switches to Mezo.
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).click()
