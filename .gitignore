@@ -13,3 +13,5 @@ app/dist-fork/
 .env*
 keeper/.tmp/
 contracts/broadcast/
+.artifacts/
+demo/

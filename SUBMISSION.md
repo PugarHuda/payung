@@ -28,7 +28,7 @@ Mezo's promise is "live off your Bitcoin without selling it", and liquidation is
 
 **Team:** Pugar Huda Mantoro, solo builder (product, contracts, app). X: [@bangdropid](https://x.com/bangdropid) · LinkedIn: [pugar-huda-mantoro](https://www.linkedin.com/in/pugar-huda-mantoro) · GitHub: [PugarHuda](https://github.com/PugarHuda)
 
-**Links:** GitHub https://github.com/PugarHuda/payung · Live app https://payung-ecru.vercel.app · Video _URL_ · Deck _URL_
+**Links:** GitHub https://github.com/PugarHuda/payung · Live app https://payung-ecru.vercel.app · Video https://payung-ecru.vercel.app/payung-demo.mp4 (72 s screen recording of the live app on Mezo testnet, recorded by `scripts/record-demo.mjs`) · Deck https://claude.ai/artifact/1rMGP1CG9omkKeZYzJ6m51
 
 ---
 

@@ -154,7 +154,7 @@ test.describe('without a wallet', () => {
     await expect(page.locator('.redemptions')).toHaveText(/^Mezo has processed \d+ redemptions since \w{3} \d{4}, the largest [\d,]+ MUSD, the latest on .+ UTC\. Against today's queue, \d+ of them would have reached your loan\.$/)
     await expect(page.getByRole('button', { name: 'Connect wallet to buy cover' })).toBeVisible()
     // It still holds cover in the v1 vault: the app says so, and a view offers no Withdraw button.
-    await expect(page.getByText(/live cover.* in Payung v1/)).toBeVisible()
+    await expect(page.getByText(/live polic(y|ies).* in Payung v1/)).toBeVisible()
     await expect(page.getByRole('button', { name: 'Withdraw it' })).toHaveCount(0)
     await page.getByRole('button', { name: 'My cover' }).click()
     const rows = page.locator('main.policies tbody tr')

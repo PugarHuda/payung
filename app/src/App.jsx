@@ -533,7 +533,7 @@ export default function App() {
       )}
       {(me.v1?.live > 0 || me.v1?.free > 0n) && (
         <p className="banner info">
-          This wallet also has {me.v1.live > 0 && `${me.v1.live} live cover`}{me.v1.live > 0 && me.v1.free > 0n && ' and '}{me.v1.free > 0n && `${musd(me.v1.free)} to withdraw`} in Payung v1 (<a href={`${EXPLORER}/address/${ADDR.payungV1}`} target="_blank" rel="noreferrer">{ADDR.payungV1.slice(0, 6)}…{ADDR.payungV1.slice(-4)}</a>), the vault before the claim-griefing fix. The keeper still pays v1 cover out.{' '}
+          This wallet also has {me.v1.live > 0 && `${me.v1.live} live ${me.v1.live === 1 ? 'policy' : 'policies'}`}{me.v1.live > 0 && me.v1.free > 0n && ' and '}{me.v1.free > 0n && `${musd(me.v1.free)} to withdraw`} in Payung v1 (<a href={`${EXPLORER}/address/${ADDR.payungV1}`} target="_blank" rel="noreferrer">{ADDR.payungV1.slice(0, 6)}…{ADDR.payungV1.slice(-4)}</a>), the vault before the claim-griefing fix. The keeper still pays v1 cover out.{' '}
           {me.v1.free > 0n && !watching && <button className="small" disabled={!ctx.canWrite || !!busy} onClick={() => run('v1', async () => {
             const hash = await write(ADDR.payungV1, payungAbi, 'withdraw', [me.v1.free, account, account])
             return { hash, text: `Withdrew ${musd(me.v1.free)} from Payung v1.` }
