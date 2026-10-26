@@ -1,10 +1,10 @@
 // Records the demo video: the live app (production by default) walked through scene by scene, each
 // scene with a caption that is also spoken, following the 2-minute script in SUBMISSION.md.
 // Everything on screen is real: Mezo testnet data read live, viewed through ?address= (read-only)
-// for the team's wallet, which has a Mezo loan, cover in both vaults and phone alerts.
+// for the team's wallet (after the landing page), which has a Mezo loan, cover in both vaults and phone alerts.
 // Narration uses Windows' built-in speech synthesizer (System.Speech: offline, no key); each scene
-// lasts as long as its line. ffmpeg cuts the seconds of loading before the first scene and muxes the
-// voice into an H.264/AAC MP4. Without PowerShell or ffmpeg it falls back to a silent WebM.
+// lasts as long as its line. ffmpeg cuts the seconds of loading (before the first scene, and while a
+// scene marked cut loads a page) and muxes the voice into an H.264/AAC MP4. Without PowerShell or ffmpeg it falls back to a silent WebM.
 //   node scripts/record-demo.mjs [app url]    -> demo/payung-demo.mp4
 import { chromium } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
@@ -20,7 +20,17 @@ mkdirSync('demo/voice', { recursive: true })
 // Each scene: what happens on screen, then the line shown and spoken while it is on screen.
 const scenes = [
   { say: 'Mezo lets you borrow MUSD against your Bitcoin without selling it. But if Bitcoin falls far enough, the loan is liquidated, and the Bitcoin is gone.' },
-  { say: 'Payung reads the loan live from Mezo: its collateral ratio, the real liquidation line, recovery mode included, and its place in the redemption queue.', act: (p) => p.locator('.facts').scrollIntoViewIfNeeded() },
+  { say: 'Payung sells cover against that fall. Borrowers buy it, MUSD holders underwrite it, and the numbers are live from Mezo.', act: (p) => p.locator('.stats').evaluate((e) => e.scrollIntoView({ block: 'center' })) },
+  {
+    say: 'Payung reads the loan live from Mezo: its collateral ratio, the real liquidation line, recovery mode included, and its place in the redemption queue.',
+    cut: true, // the seconds this page takes to load are cut from the video
+    act: async (p) => {
+      await p.goto(`${APP}?address=${WALLET}`)
+      await p.getByRole('img', { name: /^BTC \$/ }).waitFor({ timeout: 60_000 })
+      await p.locator('.facts div', { hasText: 'Redemption queue' }).waitFor({ timeout: 60_000 })
+      await p.waitForTimeout(800)
+    },
+  },
   {
     say: 'You pick a strike just above the liquidation line. The premium comes from Bitcoin volatility that the contract measures itself, on Mezo’s own price feed.',
     act: async (p) => {
@@ -84,32 +94,43 @@ async function caption(text) {
   }, text)
 }
 
-await page.goto(`${APP}?address=${WALLET}`)
-await page.getByRole('img', { name: /^BTC \$/ }).waitFor({ timeout: 60_000 })
-await page.locator('.facts div', { hasText: 'Redemption queue' }).waitFor({ timeout: 60_000 })
-await page.waitForTimeout(800) // let the gauge and the odds chart finish drawing
+await page.goto(APP) // opens on the landing page, then views the team's loan
+await page.locator('.stats dd', { hasText: '$' }).waitFor({ timeout: 60_000 })
+await page.locator('.stats dd', { hasText: 'MUSD' }).first().waitFor({ timeout: 60_000 })
+await page.waitForTimeout(800)
+const now = () => (Date.now() - t0) / 1000
+const kept = [] // stretches of the raw recording that make the video, [from, to] in seconds
+let from
 for (const s of scenes) {
+  if (s.cut) kept.push([from, now()])
   if (s.act) await s.act(page)
   await page.waitForTimeout(400) // the scroll or tab settles before the line starts
-  s.at = (Date.now() - t0) / 1000
+  s.at = now()
+  if (from === undefined || s.cut) from = s.at - 0.3
+  s.out = kept.reduce((t, [a, b]) => t + b - a, 0) + s.at - from // where the line starts in the cut video
   await caption(s.say)
   await page.waitForTimeout(((s.seconds ?? 6) + 0.9) * 1000)
 }
 await page.waitForTimeout(1200) // a beat on the last frame
+kept.push([from, now()])
 
-const video = page.video()
+const recording = page.video()
 await context.close()
 await browser.close()
-const raw = await video.path()
-const start = scenes[0].at - 0.3
+const raw = await recording.path()
 let out = 'demo/payung-demo.mp4'
-const args = ['-v', 'error', '-y', '-ss', start.toFixed(2), '-i', raw]
+const args = ['-v', 'error', '-y', '-i', raw]
+// the kept stretches, joined: loading before the first scene and inside cut scenes is left out
+const video = kept.map(([a, b], i) => `[0:v]trim=start=${a.toFixed(2)}:end=${b.toFixed(2)},setpts=PTS-STARTPTS[v${i}]`)
+let graph = `${video.join(';')};${kept.map((_, i) => `[v${i}]`).join('')}concat=n=${kept.length}:v=1:a=0[v]`
 if (voiced) {
   // each line enters at its scene's moment in the cut video
   for (const s of scenes) args.push('-i', s.wav)
-  const delays = scenes.map((s, i) => `[${i + 1}:a]adelay=${Math.round((s.at - start) * 1000)}:all=1[a${i}]`)
-  args.push('-filter_complex', `${delays.join(';')};${scenes.map((_, i) => `[a${i}]`).join('')}amix=inputs=${scenes.length}:normalize=0[voice]`, '-map', '0:v', '-map', '[voice]', '-c:a', 'aac', '-b:a', '128k')
+  const delays = scenes.map((s, i) => `[${i + 1}:a]adelay=${Math.round(s.out * 1000)}:all=1[a${i}]`)
+  graph += `;${delays.join(';')};${scenes.map((_, i) => `[a${i}]`).join('')}amix=inputs=${scenes.length}:normalize=0[voice]`
 }
+args.push('-filter_complex', graph, '-map', '[v]')
+if (voiced) args.push('-map', '[voice]', '-c:a', 'aac', '-b:a', '128k')
 args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '20', '-movflags', '+faststart', out)
 if (tool('ffmpeg', args) === null) {
   out = 'demo/payung-demo.webm' // no ffmpeg: keep the recording as it is
@@ -117,4 +138,4 @@ if (tool('ffmpeg', args) === null) {
   renameSync(raw, out)
 }
 rmSync('demo/raw', { recursive: true, force: true })
-console.log(out, `(first ${start.toFixed(1)} s of loading cut)`)
+console.log(out, `(${(now() - kept.reduce((t, [a, b]) => t + b - a, 0)).toFixed(1)} s of loading cut)`)
