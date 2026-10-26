@@ -560,6 +560,7 @@ export default function App() {
         setTab('protect')
       }} />}
 
+      <Horizon />
       <footer>
         Mezo testnet · settles on Mezo's MUSD price feed · <a href={`${EXPLORER}/address/${PAYUNG}`} target="_blank" rel="noreferrer">vault contract</a> · <a href="https://github.com/PugarHuda/payung" target="_blank" rel="noreferrer">source</a>
       </footer>
@@ -1201,7 +1202,7 @@ function Odds({ btc, price, strike, liq, vol, expiry }) {
       <figcaption>
         Chance BTC touches {usd(strike)} in the {left(expiry)} left: {model < 0.001 ? '' : 'about '}<strong>{pctOf(model)}</strong> at the on-chain volatility.
         {windows > 0 && <> Over the last 30 days on Mezo's oracle, BTC fell {(drop * 100).toFixed(1)}% or more within {left(expiry)} in {hits} of {windows} overlapping stretches{separate < 4 ? ` (30 days hold only ${separate || 'under one'} separate stretch${separate === 1 ? '' : 'es'} this long, so read it loosely)` : ''}.</>}
-        {' '}30-day low: {usd(BigInt(Math.round(low.p)) * WAD)} on {date(low.t)}. Gold line: your strike{liq ? '; red: liquidation' : ''}.
+        {' '}30-day low: {usd(BigInt(Math.round(low.p)) * WAD)} on {date(low.t)}. Orange line: your strike{liq ? '; red: liquidation' : ''}.
       </figcaption>
     </figure>
   )
@@ -1269,6 +1270,61 @@ function Line({ y, label, value, cls }) {
       <text x="144" y={py - 3}>{value}</text>
       <text x="144" y={py + 11} className="sub">{label}</text>
     </g>
+  )
+}
+
+/** The card's horizon: a desert at sunset, a paper umbrella (payung) planted over a Bitcoin. Decoration. */
+function Horizon() {
+  return (
+    <svg className="horizon" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMax slice" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="hz-sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#f7ecdf" />
+          <stop offset="0.45" stopColor="#f8cf9c" />
+          <stop offset="1" stopColor="#f19a55" />
+        </linearGradient>
+        <radialGradient id="hz-sun" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#fff4d6" />
+          <stop offset="0.55" stopColor="#ffd98f" stopOpacity="0.9" />
+          <stop offset="1" stopColor="#f8b768" stopOpacity="0" />
+        </radialGradient>
+        <linearGradient id="hz-dune" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#c8642f" />
+          <stop offset="1" stopColor="#8f3a17" />
+        </linearGradient>
+        <linearGradient id="hz-near" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#7a2e14" />
+          <stop offset="1" stopColor="#4a1a0b" />
+        </linearGradient>
+      </defs>
+      <rect width="1200" height="300" fill="url(#hz-sky)" />
+      <circle cx="300" cy="190" r="120" fill="url(#hz-sun)" />
+      <circle cx="300" cy="190" r="42" fill="#fff1cf" />
+      <g fill="#f3b47a" opacity="0.8">
+        <ellipse cx="760" cy="70" rx="120" ry="9" />
+        <ellipse cx="860" cy="88" rx="80" ry="6" />
+        <ellipse cx="150" cy="96" rx="95" ry="7" />
+      </g>
+      {/* far mesas */}
+      <path d="M0 214 L60 214 L74 186 L170 186 L184 214 L520 214 L540 196 L640 196 L652 214 L880 214 L900 178 L1010 178 L1028 214 L1200 214 L1200 300 L0 300Z" fill="#e39a5e" opacity="0.85" />
+      {/* rolling dunes */}
+      <path d="M0 240 C150 214 260 226 380 238 C520 252 640 216 780 222 C920 228 1040 252 1200 232 L1200 300 L0 300Z" fill="url(#hz-dune)" />
+      {/* near ground and cacti */}
+      <path d="M0 270 C180 252 330 276 520 268 C700 260 860 282 1200 262 L1200 300 L0 300Z" fill="url(#hz-near)" />
+      <g fill="#3d1508">
+        <path d="M112 270 v-46 a8 8 0 0 1 16 0 v46Z M112 248 h-12 v-14 a6 6 0 0 1 12 0Z M128 242 h12 v-18 a6 6 0 0 0 -12 0Z" />
+        <path d="M1082 266 v-34 a6 6 0 0 1 12 0 v34Z M1082 250 h-9 v-10 a4.5 4.5 0 0 1 9 0Z" />
+      </g>
+      {/* the payung over a Bitcoin */}
+      <g transform="translate(900 150)">
+        <path d="M-6 0 L2 118" stroke="#3a170a" strokeWidth="5" strokeLinecap="round" />
+        <path d="M-120 18 Q-110 -58 -4 -66 Q102 -58 116 18 Q96 4 76 20 Q56 4 36 20 Q16 4 -4 20 Q-24 4 -44 20 Q-64 4 -84 20 Q-102 4 -120 18Z" fill="#eb6919" />
+        <path d="M-4 -66 Q-30 -20 -44 20 M-4 -66 Q-4 -20 -4 20 M-4 -66 Q24 -20 36 20 M-4 -66 Q-70 -30 -84 20 M-4 -66 Q62 -30 76 20" fill="none" stroke="#a73513" strokeWidth="2.2" opacity="0.7" />
+        <circle cx="-4" cy="-68" r="5" fill="#a73513" />
+        <circle cx="40" cy="104" r="22" fill="#f89737" stroke="#a73513" strokeWidth="3" />
+        <text x="40" y="112" textAnchor="middle" fontFamily="Georgia, serif" fontWeight="700" fontSize="24" fill="#5f2110">₿</text>
+      </g>
+    </svg>
   )
 }
 

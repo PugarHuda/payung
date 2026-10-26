@@ -1,14 +1,17 @@
-/* Payung: a paper umbrella (payung kertas) over a rain of falling prices.
-   Bold in one place: the price shaft. Everything else is quiet. */
+/* Payung: a paper umbrella (payung kertas) at sunset over a desert of falling prices.
+   Warm cream card on a dusk sky; bold serif headlines; orange is decoration only, never text
+   (2.7:1 on cream); text colors all hold 4.5:1 or more. */
 :root {
-  --sky: #e8eef0; /* rain-washed page */
-  --ink: #1f3440; /* monsoon slate */
-  --rain: #4f8199; /* falling price */
-  --turmeric: #d9a21b; /* the umbrella, the protection */
-  --danger: #a8322a; /* liquidation */
-  --mist: #4f6470; /* secondary text */
-  --card: #f6f9f9;
-  --line: #c7d4d9;
+  --sky: #f7ecdf; /* the cream card the app sits on */
+  --ink: #190b07; /* near-black brown */
+  --rain: #c27a45; /* falling price */
+  --turmeric: #eb6919; /* the umbrella, the protection: fills and lines only */
+  --rust: #a73513; /* accent text and links (5.7:1 on cream) */
+  --danger: #a1281c; /* liquidation */
+  --mist: #6b4535; /* secondary text (7.1:1) */
+  --card: #fff8f0;
+  --line: #e8d3bd;
+  --focus: #c24e14;
   color-scheme: light;
 }
 
@@ -16,31 +19,40 @@
 
 body {
   margin: 0;
-  background: var(--sky);
+  /* dusk: the card floats on a sunset sky, as in a landing page hero */
+  background: linear-gradient(180deg, #e98a45 0%, #f3a866 22%, #f7c995 55%, #f2dcc4 100%) fixed #f2dcc4;
   color: var(--ink);
   font: 400 1rem/1.55 'Public Sans', system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
 h1, .brand, .big, .quote strong {
-  font-family: 'Bricolage Grotesque', 'Public Sans', sans-serif;
+  font-family: 'Source Serif 4', Georgia, serif;
   font-optical-sizing: auto;
 }
 
 h1 {
-  font-size: clamp(2rem, 4.4vw, 3.1rem);
-  line-height: 1.05;
-  letter-spacing: -0.02em;
+  font-size: clamp(2.3rem, 5vw, 3.6rem);
+  line-height: 1.02;
+  letter-spacing: -0.025em;
   font-weight: 700;
-  margin: 0 0 0.75rem;
-  max-width: 16ch;
+  margin: 0 0 0.85rem;
+  max-width: 15ch;
 }
 
 .lede { color: var(--mist); max-width: 60ch; margin: 0 0 1.5rem; }
-a { color: inherit; }
+a { color: var(--rust); }
 code { background: var(--card); padding: 0 0.3em; border-radius: 4px; }
 
-.shell { max-width: 1120px; margin: 0 auto; padding: 0 20px 48px; }
+.shell {
+  max-width: 1180px;
+  margin: 40px auto;
+  padding: 0 40px;
+  background: var(--sky);
+  border-radius: 28px;
+  box-shadow: 0 30px 80px rgba(95, 33, 16, 0.25), 0 2px 0 rgba(255, 255, 255, 0.6) inset;
+  overflow: hidden; /* the horizon illustration runs to the card's edges */
+}
 
 .top {
   display: flex;
@@ -49,8 +61,8 @@ code { background: var(--card); padding: 0 0.3em; border-radius: 4px; }
   padding: 20px 0;
   flex-wrap: wrap;
 }
-.brand { display: flex; align-items: center; gap: 8px; font-size: 1.4rem; font-weight: 700; text-decoration: none; }
-.top nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 1.55rem; font-weight: 700; text-decoration: none; color: var(--ink); }
+.top nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; justify-content: center; }
 .acct { font-size: 0.9rem; color: var(--mist); display: inline-flex; align-items: center; gap: 0.5rem; }
 .tokens { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
@@ -64,14 +76,21 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.primary { background: var(--ink); color: var(--sky); }
-button.primary:not(:disabled):hover { background: #2c4a5a; }
+/* The call to action: a warm pill with a sheen. White on #c0391b is 5.5:1 (the lighter sheen
+   sits above that solid colour, which is what contrast is measured against). */
+button.primary {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 55%) #c0391b;
+  border-color: #a8300f;
+  color: #fff;
+  box-shadow: 0 8px 20px rgba(192, 57, 27, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+button.primary:not(:disabled):hover { background-color: #a8300f; }
 button.wide { width: 100%; padding: 1rem; font-size: 1.05rem; }
 .tab { border-color: transparent; padding: 0.55rem 0.9rem; }
-.tab.on { border-color: var(--ink); }
-:focus-visible { outline: 3px solid var(--turmeric); outline-offset: 2px; }
+.tab.on { border-color: var(--ink); background: var(--card); }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
-.banner { background: var(--card); border-left: 4px solid var(--rain); padding: 0.75rem 1rem; margin: 0 0 1.5rem; }
+.banner { background: var(--card); border-left: 4px solid var(--rain); padding: 0.75rem 1rem; margin: 0 0 1.5rem; border-radius: 0 12px 12px 0; }
 .banner.error { border-color: var(--danger); }
 .banner.ok { border-color: var(--turmeric); }
 
@@ -136,9 +155,16 @@ td { padding: 12px 12px 12px 0; border-top: 1px solid var(--line); }
 .pill.touched { background: var(--turmeric); border-color: var(--turmeric); }
 .pill.paid { background: var(--ink); color: var(--sky); border-color: var(--ink); }
 
-footer { margin-top: 64px; font-size: 0.85rem; color: var(--mist); }
+footer { font-size: 0.85rem; color: #fff3e6; background: #7a2e14; margin: 0 -40px; padding: 14px 40px 18px; }
+footer a { color: #fff3e6; }
+
+/* The horizon: a desert at sunset under a paper umbrella, across the bottom of the card */
+.horizon { display: block; width: calc(100% + 80px); height: auto; margin: 72px -40px 0; }
 
 @media (max-width: 760px) {
+  .shell { margin: 0; border-radius: 0; padding: 0 16px; }
+  footer { margin: 0 -16px; padding: 14px 16px 18px; }
+  .horizon { width: calc(100% + 32px); margin: 48px -16px 0; }
   .protect { grid-template-columns: 1fr; gap: 24px; }
   .gauge-col { max-width: 260px; }
   .top nav { order: 3; flex-basis: 100%; }
@@ -151,7 +177,7 @@ footer { margin-top: 64px; font-size: 0.85rem; color: var(--mist); }
 }
 
 /* v2: notes, activity, small actions */
-h2 { font: 700 1.35rem/1.2 'Bricolage Grotesque', sans-serif; margin: 3rem 0 0.75rem; }
+h2 { font: 700 1.5rem/1.2 'Source Serif 4', Georgia, serif; margin: 3rem 0 0.75rem; }
 .note { background: var(--card); border-left: 3px solid var(--danger); padding: 0.6rem 0.9rem; margin: -0.75rem 0 1.5rem; max-width: 60ch; font-size: 0.92rem; }
 .fine { color: var(--mist); font-size: 0.85rem; max-width: 60ch; margin: -0.5rem 0 1rem; }
 button.small { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
@@ -170,7 +196,7 @@ fieldset.field legend { font-size: 0.9rem; color: var(--mist); padding: 0; margi
 .seg label { border: 1.5px solid var(--line); border-radius: 999px; padding: 0.45rem 0.9rem; cursor: pointer; font-weight: 600; font-size: 0.92rem; background: var(--card); }
 .seg label.on { border-color: var(--ink); background: var(--ink); color: var(--sky); }
 .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.seg label:has(input:focus-visible) { outline: 3px solid var(--turmeric); outline-offset: 2px; }
+.seg label:has(input:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 /* Share price since launch: one quiet line, the caption carries the numbers */
 .history { margin: 0 0 1.75rem; max-width: 760px; }
