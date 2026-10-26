@@ -12,6 +12,6 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "viem": "^2.57.8"
+    "viem": "^2.57.10"
   }
 }
